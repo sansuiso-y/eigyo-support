@@ -81,6 +81,7 @@
       if (json.settings) Store.saveSettings(json.settings);
     },
     clearAll(){
+      localStorage.removeItem(PREFIX+'plans'); delete cache['plans']; // 営業計画の下書き(端末内のみ)も消す
       COLS.forEach(c=>{ cache[c]=[]; write(c); if (!applying) Sync.replaceCol(c); });
       localStorage.removeItem(PREFIX+'settings');
       localStorage.removeItem(PREFIX+'geocache');
@@ -162,7 +163,7 @@
     const canTry = /^https?:$/.test(location.protocol);
     const LOCAL_KEYS = ['userName','theme']; // 端末ごとの値(複数人で共有しない)
     // mode: 'server'(同期サーバーあり/確認中) | 'static'(同期機能のないWebサーバー) | 'none'(file:// で直接開いた)
-    const st = { mode: canTry ? 'server' : 'none', online: false, checked: false, syncing: false, auth: false, needLogin: false,
+    const st = { mode: canTry ? 'server' : 'none', online: false, checked: false, syncing: false, auth: false, user: null, needLogin: false,
       lastSyncAt: localStorage.getItem(K.last) || null, lastError: null, serverUrl: location.origin };
     const subs = [];
     let timer = null, inflight = null, periodic = null, pullRequested = false;
@@ -185,7 +186,7 @@
       if (changed) notify();
     }
     function state(){
-      return { mode: st.mode, online: st.online, checked: st.checked, syncing: st.syncing, auth: st.auth, needLogin: st.needLogin,
+      return { mode: st.mode, online: st.online, checked: st.checked, syncing: st.syncing, auth: st.auth, user: st.user, needLogin: st.needLogin,
         lastSyncAt: st.lastSyncAt, lastError: st.lastError, serverUrl: st.serverUrl, pending: st.mode==='server' ? pendingCount() : 0 };
     }
     async function fetchT(url, opts={}, ms=8000){
@@ -406,7 +407,8 @@
         }
         setOnline(false, new Error(res.ok ? '同期サーバーの応答ではありません' : `サーバーエラー ${res.status}`)); return false;
       }
-      st.auth = !!s.auth; st.needLogin = false; setOnline(true);
+      st.auth = !!s.auth; st.user = s.user || null; st.needLogin = false; setOnline(true);
+      if (st.user && st.user.displayName && !Store.settings().userName) Store.saveSettings({ userName: st.user.displayName }); // 氏名が未設定ならログイン名から
       return true;
     }
     async function doSync({reload=true}={}){

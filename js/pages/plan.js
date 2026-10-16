@@ -17,7 +17,7 @@
     return cs.find(c => c.company && norm(c.company)===norm(r.company) && (!r.name || !c.name || norm(c.name)===norm(r.name)))
         || (r.name && cs.find(c => c.name && norm(c.name)===norm(r.name) && !r.company)) || null;
   }
-  function loadScript(src){ return new Promise((res,rej)=>{ if (document.querySelector(`script[src="${src}"]`)) return res(); const s = h('script',{src, onLoad:res, onError:()=>rej(new Error('読み込みに失敗: '+src))}); document.head.appendChild(s); }); }
+  function loadScript(src){ return new Promise((res,rej)=>{ const ex = document.querySelector(`script[src="${src}"]`); if (ex && ex.dataset.loaded) return res(); if (ex) ex.remove(); const s = h('script',{src, onLoad:()=>{ s.dataset.loaded='1'; res(); }, onError:()=>{ s.remove(); rej(new Error('読み込みに失敗: '+src)); }}); document.head.appendChild(s); }); }
 
   /* ---------- 列名の推定(CSV/Excel) ---------- */
   const COLMAP = [
@@ -45,11 +45,12 @@
       const g = k => idx[k]===undefined ? '' : String(r[idx[k]]??'').trim();
       const o = Object.assign(emptyRow(), { company:g('company'), name:g('name'), title:g('title'), category:g('category'), phone:g('phone'), address:g('address'), memo:g('memo') });
       const st = Number(g('stayMin')); if (st>0) o.stayMin = st;
-      const d = g('date'); if (/^\d{4}-\d{2}-\d{2}$/.test(d)) o.date = d;
-      const tf = g('timeFrom'); const tm = /^(\d{1,2}):(\d{2})/.exec(tf); if (tm) o.timeFrom = UI.pad(tm[1])+':'+tm[2];
+      const dm = /^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})/.exec(g('date')); if (dm) o.date = `${dm[1]}-${UI.pad(dm[2])}-${UI.pad(dm[3])}`;
+      const tms = [...g('timeFrom').matchAll(/(\d{1,2}):(\d{2})/g)].map(m=>UI.pad(m[1])+':'+m[2]); if (tms[0]) o.timeFrom = tms[0]; if (tms[1]) o.timeTo = tms[1];
       return o;
     }).filter(r => r.company || r.name);
   }
+  async function readText(f){ const buf = await f.arrayBuffer(); try { return new TextDecoder('utf-8',{fatal:true}).decode(buf); } catch(e){ try { return new TextDecoder('shift_jis').decode(buf); } catch(e2){ return new TextDecoder().decode(buf); } } }
   async function parseCsv(text){
     const out=[]; let row=[], cell='', q=false;
     for (let i=0;i<text.length;i++){ const c=text[i];
@@ -59,7 +60,7 @@
     return out;
   }
   async function parseXlsx(file){
-    await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+    await loadScript('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');
     const wb = XLSX.read(await file.arrayBuffer(), {type:'array'});
     const ws = wb.Sheets[wb.SheetNames[0]];
     return XLSX.utils.sheet_to_json(ws, {header:1, raw:false, defval:''});
@@ -103,26 +104,36 @@
       const timed = day.must.filter(s=>s.timeFrom).sort((a,b)=>toMin(a.timeFrom)-toMin(b.timeFrom));
       let mustFree = day.must.filter(s=>!s.timeFrom);
       let cur = null, t = ws; const order = [];
-      const fits = (s, limit) => { const arr = t + travel(cur,s); const dep = arr + (s.stayMin||45); const after = timed.length ? travel(s, timed[0]) : (opt.roundTrip ? travel(s, null) : 0); return dep + after <= limit ? {arr,dep} : null; };
+      const MAX_WAIT = 60; // 希望時間まで待てる上限(分)。それ以上なら今は入れず、後で入れる
+      const fits = (s, limit) => {
+        let arr = t + travel(cur,s), wait = 0;
+        if (s.timeFrom){ const tf = toMin(s.timeFrom); if (tf !== null && tf > arr){ wait = tf - arr; if (wait > MAX_WAIT) return null; arr = tf; } }
+        if (s.timeTo){ const tt = toMin(s.timeTo); if (tt !== null && arr > tt) return null; }
+        const dep = arr + stay(s);
+        const after = timed.length ? travel(s, timed[0]) : (opt.roundTrip ? travel(s, null) : 0);
+        return dep + after <= limit ? {arr,dep,wait} : null;
+      };
       while (true){
-        const limit = timed.length ? toMin(timed[0].timeFrom) : we;
+        const limit = timed.length ? Math.min(toMin(timed[0].timeFrom), we) : we;
         // 近い順に、次の固定時刻(または業務終了)までに収まる訪問先を入れる
         let best=null, bd=Infinity, fromMust=false;
-        for (const s of mustFree){ const d=travel(cur,s); if (d<bd && fits(s,limit)){ bd=d; best=s; fromMust=true; } }
-        if (!best) for (const s of pool){ const d=travel(cur,s); if (d<bd && fits(s,limit)){ bd=d; best=s; } }
+        for (const s of mustFree){ const f=fits(s,limit); if (f && travel(cur,s)+f.wait<bd){ bd=travel(cur,s)+f.wait; best=s; fromMust=true; } }
+        if (!best) for (const s of pool){ const f=fits(s,limit); if (f && travel(cur,s)+f.wait<bd){ bd=travel(cur,s)+f.wait; best=s; } }
         if (best){ const f = fits(best, limit); order.push(best); t = f.dep; cur = best; if (fromMust) mustFree = mustFree.filter(x=>x!==best); else pool = pool.filter(x=>x!==best); continue; }
         if (timed.length){ // 固定時刻の訪問先へ
           const s = timed.shift(); const arr = Math.max(t + travel(cur,s), toMin(s.timeFrom));
           if (s.timeTo && arr > toMin(s.timeTo)) day.warnings.push(`${s.label}: 希望時間帯 ${s.timeFrom}〜${s.timeTo} に間に合いません(到着 ${fmtT(arr)})`);
-          order.push(s); t = arr + (s.stayMin||45); cur = s; continue;
+          if (arr + stay(s) > we) day.warnings.push(`${s.label}: 希望時刻 ${s.timeFrom} は業務終了(${opt.workEnd})を超えます`);
+          order.push(s); t = arr + stay(s); cur = s; continue;
         }
         if (mustFree.length){ // 希望日指定だが時間内に入らない → 無理やり入れて警告
-          const s = mustFree.shift(); const arr = t + travel(cur,s); order.push(s); t = arr + (s.stayMin||45); cur = s; day.warnings.push(`${s.label}: 業務終了(${opt.workEnd})を超えます`); continue;
+          const s = mustFree.shift(); const arr = t + travel(cur,s); order.push(s); t = arr + stay(s); cur = s; day.warnings.push(s.timeTo && arr > toMin(s.timeTo) ? `${s.label}: 希望時間帯(〜${s.timeTo})に間に合いません(到着 ${fmtT(arr)})` : `${s.label}: 業務終了(${opt.workEnd})を超えます`); continue;
         }
         break;
       }
       day.stops = order;
     }
+    pool.forEach(s=>{ if (s.timeFrom || s.timeTo) s.note = `時間帯 ${s.timeFrom||''}〜${s.timeTo||''} を守って入れられる日がありませんでした`; });
     unassigned.push(...pool);
     // 時刻指定のない日は2-optで並べ直し
     for (const day of days){
@@ -133,11 +144,12 @@
     }
     return { days, unassigned };
   }
+  const stay = s => Number(s.stayMin) > 0 ? Number(s.stayMin) : 45;
   async function itinerary(start, day, opt){
     const pts = [start, ...day.stops]; if (opt.roundTrip && day.stops.length) pts.push(start);
     const r = await Geo.route(pts);
     const ws = toMin(opt.workStart) ?? 540; let t = ws; const rows = [];
-    day.stops.forEach((s,i)=>{ const leg = r.legs?.[i] || {durationMin:0, distanceKm:0}; let arr = t + leg.durationMin; let wait = 0; if (s.timeFrom && toMin(s.timeFrom) > arr){ wait = toMin(s.timeFrom) - arr; arr = toMin(s.timeFrom); } const late = s.timeTo && arr > toMin(s.timeTo); const dep = arr + (s.stayMin||45); rows.push({ stop:s, arr, dep, wait, late, legKm:leg.distanceKm, legMin:leg.durationMin }); t = dep; });
+    day.stops.forEach((s,i)=>{ const leg = r.legs?.[i] || {durationMin:0, distanceKm:0}; let arr = t + leg.durationMin; let wait = 0; if (s.timeFrom && toMin(s.timeFrom) > arr){ wait = toMin(s.timeFrom) - arr; arr = toMin(s.timeFrom); } const late = s.timeTo && arr > toMin(s.timeTo); const dep = arr + stay(s); rows.push({ stop:s, arr, dep, wait, late, legKm:leg.distanceKm, legMin:leg.durationMin }); t = dep; });
     let backMin = 0, backKm = 0; if (opt.roundTrip && day.stops.length){ const leg = r.legs?.[day.stops.length]; if (leg){ backMin = leg.durationMin; backKm = leg.distanceKm; } }
     return { rows, distanceKm: r.distanceKm, durationMin: r.durationMin, estimated: r.estimated, end: t + backMin, backMin, backKm };
   }
@@ -167,7 +179,7 @@
           try {
             const ext = (f0.name||'').split('.').pop().toLowerCase();
             let rows = [];
-            if (ext==='csv' || ext==='txt' || f0.type==='text/csv'){ rows = rowsFromTable(await parseCsv(await f0.text())); }
+            if (ext==='csv' || ext==='txt' || f0.type==='text/csv'){ rows = rowsFromTable(await parseCsv(await readText(f0))); }
             else if (ext==='xlsx' || ext==='xls'){ progress.textContent='Excelを読み込み中…'; rows = rowsFromTable(await parseXlsx(f0)); }
             else { const f = await shrinkImage(f0); rows = await extractByAI(f, m=>progress.textContent=m); }
             rows.forEach(r=>{ const c = findCustomer(r); if (c){ r.customerId = c.id; r.address = r.address || c.address || ''; r.phone = r.phone || c.phone || ''; if (hasCoord(c)){ r.lat=c.lat; r.lng=c.lng; } } });
@@ -217,12 +229,12 @@
             cell(r,'company',{style:{minWidth:'140px'}}), cell(r,'name',{style:{minWidth:'100px'}}), cell(r,'title',{style:{minWidth:'80px'}}),
             h('td',null, catSel),
             cell(r,'phone',{style:{minWidth:'110px'}}),
-            h('td',null, h('div',{class:'row', style:{flexWrap:'nowrap'}}, h('input',{type:'text', value:r.address||'', placeholder:'住所(ルート作成に必要)', style:{minWidth:'200px'}, onChange:(e)=>{ r.address=e.target.value; r.lat=null; r.lng=null; saveDraft(); renderList(); }}),
+            h('td',null, h('div',{class:'row', style:{flexWrap:'nowrap'}}, h('input',{type:'text', value:r.address||'', placeholder:'住所(ルート作成に必要)', style:{minWidth:'200px'}, onChange:(e)=>{ r.address=e.target.value; r.lat=null; r.lng=null; r.geoNote=''; saveDraft(); renderList(); }}),
               h('a',{class:'btn sm', href:`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent((r.company||'')+' '+(r.address||''))}`, target:'_blank', rel:'noopener', title:'地図で住所を調べる'}, '🔍'))),
             h('td',null, h('input',{type:'date', value:r.date||'', style:{width:'150px'}, onChange:(e)=>{ r.date=e.target.value; saveDraft(); }})),
             h('td',null, h('div',{class:'row', style:{flexWrap:'nowrap', gap:'2px'}}, h('input',{type:'time', value:r.timeFrom||'', style:{width:'105px'}, title:'この時刻以降', onChange:(e)=>{ r.timeFrom=e.target.value; saveDraft(); }}), '〜', h('input',{type:'time', value:r.timeTo||'', style:{width:'105px'}, title:'この時刻まで', onChange:(e)=>{ r.timeTo=e.target.value; saveDraft(); }}))),
             h('td',null, h('input',{type:'number', value:r.stayMin||'', placeholder:String(settings.defaultStayMin||45), min:5, step:5, style:{width:'70px'}, onChange:(e)=>{ r.stayMin = Number(e.target.value)||null; saveDraft(); }})),
-            h('td',{class:'nowrap small'}, hasCoord(r) ? h('span',{class:'badge done'},'OK') : h('span',{class:'badge draft'}, r.address ? '未取得' : '住所なし')),
+            h('td',{class:'nowrap small'}, hasCoord(r) ? (r.geoNote ? h('span',{class:'badge draft', title:r.geoNote}, '要確認') : h('span',{class:'badge done'},'OK')) : h('span',{class:'badge draft'}, r.address ? '未取得' : '住所なし')),
             h('td',null, h('button',{class:'btn sm', onClick:()=>{ state.rows = state.rows.filter(x=>x!==r); saveDraft(); renderList(); }}, '✕'))
           ));
         }
@@ -256,13 +268,13 @@
       async function geocodeAll(){
         const targets = state.rows.filter(r=>r.checked && !hasCoord(r) && (r.address || r.company));
         if (!targets.length){ toast('座標を取得する行がありません'); return; }
-        let ok=0, ng=0; const t0 = toast; 
+        let ok=0, ng=0;
         for (let i=0;i<targets.length;i++){
           const r = targets[i]; progress.textContent = `座標を取得中 ${i+1}/${targets.length}: ${rowLabel(r)}`;
           try {
-            let g = r.address ? await Geo.geocode(r.address) : null;
-            if (!g && r.company) g = await Geo.geocode(r.company);
-            if (g){ r.lat=g.lat; r.lng=g.lng; ok++; } else ng++;
+            let g = r.address ? await Geo.geocode(r.address) : null; let note = g && g.simplified ? `住所を「${g.simplified}」に簡略化して検索` : '';
+            if (!g && r.company){ g = await Geo.geocode(r.company); if (g) note = '会社名で検索(住所では見つからず)'; }
+            if (g){ r.lat=g.lat; r.lng=g.lng; r.geoNote = note; ok++; } else ng++;
           } catch(e){ ng++; }
         }
         progress.textContent=''; saveDraft(); renderList();
@@ -319,7 +331,7 @@
             if (u.checked!==undefined) r.checked = !!u.checked;
             if (u.stayMin) r.stayMin = Number(u.stayMin)||r.stayMin;
           }
-          if (j.days) { state.days = Number(j.days)||state.days; daysInp.value = state.days; }
+          if (j.days) { state.days = Math.min(30, Math.max(1, Math.floor(Number(j.days))||state.days)); daysInp.value = state.days; }
           if (j.startDate && /^\d{4}-\d{2}-\d{2}$/.test(j.startDate)) { state.startDate = j.startDate; startDateInp.value = j.startDate; }
           saveDraft(); renderList();
           aiMsg.textContent = (j.message||'反映しました') + ` (${n}件を更新)`;
@@ -329,8 +341,12 @@
       const buildBtn = h('button',{class:'btn primary', onClick: async()=>{
         const start = { lat:Number(state.startLat), lng:Number(state.startLng) };
         if (!hasCoord(start)){ toast('先に出発地を設定してください(設定の拠点住所、または上の欄)', {error:true}); return; }
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(state.startDate||'')){ toast('開始日を入力してください', {error:true}); return; }
+        state.days = Math.min(30, Math.max(1, Math.floor(Number(state.days))||1)); daysInp.value = state.days;
         const sel = state.rows.filter(r=>r.checked);
         if (!sel.length){ toast('訪問先を選択してください', {error:true}); return; }
+        const bad = sel.find(r=>r.timeFrom && r.timeTo && toMin(r.timeFrom) > toMin(r.timeTo));
+        if (bad){ toast(`${rowLabel(bad)}: 時間帯の開始が終了より後になっています`, {error:true}); return; }
         if (sel.some(r=>!hasCoord(r))){ await geocodeAll(); }
         const ready = sel.filter(r=>hasCoord(r)); const skipped = sel.length - ready.length;
         if (!ready.length){ toast('座標のある訪問先がありません。住所を入力して「座標を取得」してください', {error:true}); return; }
@@ -360,7 +376,7 @@
         if (!p){ planEl.append(UI.empty('「計画を自動作成」を押すと、ここに日ごとの訪問計画が表示されます。')); return; }
         const we = toMin(state.workEnd) ?? 1080;
         const dayOptions = p.days.map(d=>[d.date, UI.fmtDate(d.date)]);
-        const moveTo = (fromDay, stop, toDate) => { fromDay.stops = fromDay.stops.filter(s=>s!==stop); if (toDate==='__un'){ p.unassigned.push(stop); } else { p.days.find(d=>d.date===toDate).stops.push(stop); } saveDraft(); computeAll().then(renderPlan); };
+        const moveTo = (fromDay, stop, toDate) => { if (!toDate || (toDate!=='__un' && !p.days.find(d=>d.date===toDate))) return; fromDay.stops = fromDay.stops.filter(s=>s!==stop); if (toDate==='__un'){ p.unassigned.push(stop); } else { p.days.find(d=>d.date===toDate).stops.push(stop); } saveDraft(); computeAll().then(renderPlan); };
         p.days.forEach((day, di)=>{
           const it = p.itins[day.date];
           const over = it && it.end > we;
@@ -407,24 +423,32 @@
         const p = state.plan; if (!p) return;
         const total = p.days.reduce((a,d)=>a+d.stops.length,0);
         const existing = p.days.flatMap(d=>Store.where('events', e=>e.date===d.date && e.type==='visit'));
-        const ok = await UI.confirm(`${p.days.length}日分・${total}件の訪問予定を登録します。${existing.length?`(対象日には既に ${existing.length} 件の訪問予定があります。重複に注意してください)`:''}`, {ok:'登録する', danger:false});
+        const prevCount = Store.where('events', e=>e.planId===state.id).length;
+        const others = existing.filter(e=>e.planId!==state.id).length;
+        const ok = await UI.confirm(`${p.days.length}日分・${total}件の訪問予定を登録します。${prevCount?`前回この計画で登録した ${prevCount} 件は置き換えます。`:''}${others?`対象日には別の訪問予定が ${others} 件あります。`:''}`, {ok:'登録する', danger:false});
         if (!ok) return;
-        let ev=0;
+        saveDraft();
+        const planId = state.id;
+        const prevEv = Store.where('events', e=>e.planId===planId), prevRt = Store.where('routes', r=>r.planId===planId);
+        prevEv.forEach(e=>Store.remove('events', e.id)); prevRt.forEach(r=>Store.remove('routes', r.id));
+        let ev=0, skipped=0;
         for (const day of p.days){
           const it = p.itins[day.date];
           day.stops.forEach((s,i)=>{
+            const row0 = it?.rows?.[i]; if (row0 && row0.arr >= 1440){ skipped++; return; } // 翌日にまたがる行は登録しない
             const row = state.rows.find(r=>r.key===s.key);
             let cid = s.customerId;
             if (!cid && row){ registerRow(row); cid = row.customerId; s.customerId = cid; }
             const r = it?.rows?.[i];
-            Store.save('events', { date: day.date, start: r?fmtT(r.arr).slice(0,5):'', end: r?fmtT(r.dep).slice(0,5):'', title: `${s.label} 訪問`, type:'visit', customerId: cid||'', address: s.address||'', lat:s.lat, lng:s.lng, memo: s.memo||'', status:'planned', attachmentIds:[] });
+            Store.save('events', { date: day.date, start: r?fmtT(r.arr).slice(0,5):'', end: r?fmtT(Math.min(r.dep, 1439)).slice(0,5):'', title: `${s.label} 訪問`, type:'visit', customerId: cid||'', address: s.address||'', lat:s.lat, lng:s.lng, memo: s.memo||'', status:'planned', attachmentIds:[], planId });
             ev++;
           });
-          Store.save('routes', { date: day.date, name:`営業計画 ${UI.fmtDate(day.date)}`, startLabel: state.startLabel||'出発地', startAddress: state.startAddress, startLat: Number(state.startLat), startLng: Number(state.startLng), roundTrip: state.roundTrip, departTime: state.workStart,
-            stops: day.stops.map(s=>({ customerId:s.customerId, label:s.label, address:s.address, lat:s.lat, lng:s.lng, stayMin:s.stayMin })), distanceKm: it?.distanceKm||0, durationMin: it?.durationMin||0 });
+          if (!day.stops.length) continue;
+          Store.save('routes', { planId, date: day.date, name:`営業計画 ${UI.fmtDate(day.date)}`, startLabel: state.startLabel||'出発地', startAddress: state.startAddress, startLat: Number(state.startLat), startLng: Number(state.startLng), roundTrip: state.roundTrip, departTime: state.workStart,
+            stops: day.stops.map(s=>({ customerId:s.customerId||'', label:s.label, address:s.address, lat:s.lat, lng:s.lng, stayMin:stay(s) })), distanceKm: Math.round((it?.distanceKm||0)*10)/10, durationMin: Math.round(it?.durationMin||0) });
         }
         saveDraft();
-        toast(`${ev}件の予定を登録しました`);
+        toast(`${ev}件の予定を登録しました${prevEv.length?`(前回この計画で登録した ${prevEv.length} 件は置き換え)`:''}${skipped?`(翌日にまたがる ${skipped} 件は登録せず)`:''}`, {ms:6000});
         App.go(`schedule?view=week&date=${p.days[0].date}`);
       }
       function registerRow(r){

@@ -9,7 +9,7 @@
   /* 住所の簡略化候補: 「…, 1층」「…ビル3F」などを落として順に試す */
   function variants(address){
     const out = [address];
-    const noFloor = address.replace(/[\s,、]*(\d+\s*(층|階|F|f)|[0-9０-９]+(号室|호))\s*$/u,'').replace(/[\s,、]*(\d+\s*(층|階|F))\b.*$/u,'').trim();
+    const noFloor = address.replace(/[\s,、]*([0-9０-９]+\s*(층|階|[FfＦ])|[0-9０-９]+(号室|号|호))(\s.*)?$/u,'').trim();
     if (noFloor && noFloor !== address) out.push(noFloor);
     const beforeComma = address.split(/[,、]/)[0].trim();
     if (beforeComma && !out.includes(beforeComma)) out.push(beforeComma);
@@ -19,15 +19,18 @@
     if (noBldg && !out.includes(noBldg)) out.push(noBldg);
     return out;
   }
+  const missCache = new Set(); // このセッション中に見つからなかった住所(再問い合わせを避ける)
   async function geocode(address){
     address = (address||'').trim();
     if (!address) return null;
     if (geoCache[address]) return geoCache[address];
+    if (missCache.has(address)) return null;
     const cands = variants(address);
     for (let i=0;i<cands.length;i++){
       const r = await geocodeOne(cands[i]);
       if (r){ if (i>0){ r.simplified = cands[i]; geoCache[address] = r; saveCache(); } return r; }
     }
+    missCache.add(address);
     return null;
   }
   async function geocodeOne(address){

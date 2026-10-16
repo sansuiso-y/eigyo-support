@@ -2,6 +2,7 @@
  * AI 機能(Gemini API)— 営業計画ページ用
  *   POST /api/extract  … 写真・PDF の訪問先リストを表(JSON)に読み取る
  *   POST /api/assist   … 「どこをいつ回りたいか」の日本語の注文を、行ごとの希望日・時間帯に変換する
+ *   POST /api/lookup   … 会社名から所在地を Google 検索付きで調べる(要確認として扱う)
  * 環境変数 GEMINI_API_KEY が必要(他の社内アプリと共用)。未設定なら 503 を返す。
  */
 'use strict';
@@ -17,18 +18,39 @@ async function gemini({ parts, system, schema, tools }){
     const body = { contents:[{ role:'user', parts }], generationConfig:{ maxOutputTokens: 16000, temperature: 0.1, responseMimeType:'application/json', ...(schema ? { responseSchema: schema } : {}) } };
     if (system) body.systemInstruction = { parts:[{ text: system }] };
     if (tools){ body.tools = tools; delete body.generationConfig.responseMimeType; delete body.generationConfig.responseSchema; } // 検索ツール併用時はJSONモード不可
-    const res = await fetch(`${BASE}/models/${model}:generateContent`, { method:'POST', headers:{ 'Content-Type':'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body) });
-    if (res.status === 404){ lastErr = new Error(`モデル ${model} が見つかりません`); continue; }
+    const ctl = new AbortController(); const timer = setTimeout(()=>ctl.abort(), 90000);
+    let res;
+    try { res = await fetch(`${BASE}/models/${model}:generateContent`, { method:'POST', headers:{ 'Content-Type':'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body), signal: ctl.signal }); }
+    catch(err){ clearTimeout(timer); lastErr = new Error(err.name==='AbortError' ? 'AIの応答が時間内に返りませんでした' : 'AIに接続できませんでした'); lastErr.status = 504; continue; }
+    clearTimeout(timer);
+    if (res.status === 404 || res.status >= 500){ lastErr = new Error(res.status===404 ? `モデル ${model} が見つかりません` : `AIが混み合っています (${res.status})`); lastErr.status = 502; continue; } // 次のモデルへ
     if (!res.ok){
       let detail=''; try { detail = (await res.json()).error?.message || ''; } catch(e){}
       const e = new Error(res.status===429 ? 'AIの利用上限に達しました。少し待ってからお試しください' : `AIエラー (${res.status}) ${detail}`.trim()); e.status = res.status===429?429:502; throw e;
     }
     const data = await res.json();
     const text = (data.candidates?.[0]?.content?.parts || []).map(p=>p.text||'').join('');
-    if (!text){ const e = new Error('AIの応答が空でした (' + (data.candidates?.[0]?.finishReason || data.promptFeedback?.blockReason || '不明') + ')'); e.status = 502; throw e; }
-    try { return JSON.parse(text); } catch(err){ const m = text.match(/\{[\s\S]*\}/); if (m) return JSON.parse(m[0]); const e = new Error('AIの応答を解釈できませんでした'); e.status = 502; throw e; }
+    const finish = data.candidates?.[0]?.finishReason || '';
+    if (!text){ const e = new Error('AIの応答が空でした (' + (finish || data.promptFeedback?.blockReason || '不明') + ')'); e.status = 502; throw e; }
+    const parsed = parseJson(text);
+    if (parsed) return parsed;
+    const e = new Error(finish === 'MAX_TOKENS' ? '資料が長すぎてAIの応答が途中で切れました。ページを分けて取り込んでください' : 'AIの応答を解釈できませんでした'); e.status = 502; throw e;
   }
   throw lastErr || new Error('AIを呼び出せませんでした');
+}
+
+/* 応答テキストからJSONを取り出す(コードブロック記号や前置きがあっても、最初の { から括弧の対応が取れる所まで) */
+function parseJson(text){
+  const t = String(text||'').replace(/```(?:json)?/gi,'').trim();
+  try { return JSON.parse(t); } catch(e){}
+  const start = t.indexOf('{'); if (start < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let i=start;i<t.length;i++){
+    const c = t[i];
+    if (inStr){ if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+    if (c === '"') inStr = true; else if (c === '{') depth++; else if (c === '}'){ depth--; if (depth === 0){ try { return JSON.parse(t.slice(start, i+1)); } catch(e){ return null; } } }
+  }
+  return null;
 }
 
 const ROW_SCHEMA = { type:'OBJECT', properties:{ rows:{ type:'ARRAY', items:{ type:'OBJECT', properties:{
@@ -63,7 +85,7 @@ async function assist(input){
   const rows = Array.isArray(input.rows) ? input.rows.slice(0,300) : [];
   const instruction = str(input.instruction).slice(0, 4000);
   if (!instruction){ const e = new Error('注文の文章がありません'); e.status=400; throw e; }
-  const startDate = str(input.startDate), days = Number(input.days)||1;
+  const startDate = str(input.startDate), days = Math.min(60, Math.max(1, Math.floor(Number(input.days))||1));
   const dates = []; if (/^\d{4}-\d{2}-\d{2}$/.test(startDate)){ const [y,m,d] = startDate.split('-').map(Number); for (let i=0;i<days;i++){ const t = new Date(Date.UTC(y, m-1, d+i)); dates.push(`${i+1}日目=${t.getUTCFullYear()}-${String(t.getUTCMonth()+1).padStart(2,'0')}-${String(t.getUTCDate()).padStart(2,'0')}`); } }
   const system = `あなたは営業担当の計画アシスタントです。訪問先リスト(各行に key があります)と、担当者の日本語の注文を受け取り、各行に反映すべき内容を JSON で返します。
 期間: 開始日 ${startDate||'未定'}、${days}日間。日目と日付の対応: ${dates.join(', ')||'日付未定'}。「最終日」= ${days}日目 = ${dates.length?dates[dates.length-1].split('=')[1]:'未定'}、「初日」= 1日目。業務時間 ${str(input.workStart)||'09:00'}〜${str(input.workEnd)||'18:00'}。
@@ -77,14 +99,16 @@ async function assist(input){
   const keys = new Set(rows.map(r=>str(r.key)));
   const updates = (Array.isArray(out.updates)?out.updates:[]).filter(u=>u && keys.has(str(u.key))).map(u=>{
     const o = { key: str(u.key) };
-    if (u.date !== undefined && u.date !== null && u.date !== ''){ o.date = /^\d{4}-\d{2}-\d{2}$/.test(u.date) ? u.date : ''; }
-    if (u.timeFrom) o.timeFrom = hhmm(u.timeFrom); if (u.timeTo) o.timeTo = hhmm(u.timeTo);
+    if (u.date === null) o.date = '';                                   // 明示的な解除
+    else if (/^\d{4}-\d{2}-\d{2}$/.test(str(u.date))) o.date = str(u.date); // 形式が不正なら項目ごと無視
+    if (u.timeFrom === null) o.timeFrom = ''; else if (hhmm(u.timeFrom)) o.timeFrom = hhmm(u.timeFrom);
+    if (u.timeTo === null) o.timeTo = ''; else if (hhmm(u.timeTo)) o.timeTo = hhmm(u.timeTo);
     if (typeof u.checked === 'boolean') o.checked = u.checked;
     if (Number(u.stayMin) > 0) o.stayMin = Number(u.stayMin);
     return o;
   });
   const res = { updates, message: str(out.message) };
-  if (Number(out.days) > 0) res.days = Number(out.days);
+  if (Math.floor(Number(out.days)) > 0) res.days = Math.min(60, Math.floor(Number(out.days)));
   if (/^\d{4}-\d{2}-\d{2}$/.test(str(out.startDate))) res.startDate = out.startDate;
   return res;
 }
@@ -104,17 +128,21 @@ async function lookup(input){
   return { results };
 }
 function str(v){ return v === null || v === undefined ? '' : String(v).trim(); }
-function hhmm(v){ const m = /^(\d{1,2}):(\d{2})/.exec(String(v||'')); return m ? `${String(m[1]).padStart(2,'0')}:${m[2]}` : ''; }
+function hhmm(v){ const m = /^(\d{1,2}):(\d{2})/.exec(String(v||'')); if (!m) return ''; const hh = Number(m[1]), mm = Number(m[2]); if (hh > 23 || mm > 59) return ''; return `${String(hh).padStart(2,'0')}:${m[2]}`; }
 
 /* server.js から呼ぶ: 処理できたら true、対象外なら false */
 async function handle(req, res, url, { readBody, send }){
   const parts = url.pathname.split('/').filter(Boolean);
   if (parts[0] !== 'api' || !['extract','assist','lookup'].includes(parts[1])) return false;
   if (req.method !== 'POST'){ send(res, 405, { error:'method not allowed' }); return true; }
+  const limit = parts[1] === 'extract' ? MAX_FILE : 2*1024*1024;
+  const declared = Number(req.headers['content-length'] || 0);
+  if (declared > limit){ send(res, 413, { error: parts[1]==='extract' ? 'ファイルが大きすぎます(25MBまで)' : '送信データが大きすぎます' }); req.resume(); return true; }
   try {
     if (parts[1] === 'extract'){
       const buf = await readBody(req, MAX_FILE);
-      const out = await extract(buf, req.headers['content-type'], decodeURIComponent(req.headers['x-file-name'] || ''));
+      let fname = ''; try { fname = decodeURIComponent(req.headers['x-file-name'] || ''); } catch(e){ fname = ''; }
+      const out = await extract(buf, req.headers['content-type'], fname);
       send(res, 200, out);
     } else {
       let json; try { json = JSON.parse((await readBody(req, 2*1024*1024)).toString('utf8')); } catch(e){ send(res, 400, { error:'invalid json' }); return true; }

@@ -108,3 +108,11 @@ attachments (IndexedDB 'files'): {id, name, type, size, blob, linkedKind, linked
 3. 各日: 出発地から、次の固定時刻(なければ業務終了)までに「移動+滞在+次への移動」が収まる最寄りを順に追加。固定時刻の行は到着が早ければ待つ。希望日指定なのに入らない行は入れて警告
 4. 固定時刻のない日は 2-opt(Geo.optimize)で並べ直し。残りは「未割当」
 5. 「予定表に反映」で events(type:visit, 到着/出発時刻)と routes(日ごと)を保存。未登録の訪問先は customers に登録
+
+## 認証(auth.js、クラウド版 AUTH_REQUIRED=1)
+- ユーザーは DATA_DIR/users.json(scrypt ハッシュ)。ログイン名は半角英数字 2〜32 文字、パスワード 8 文字以上。役割 admin / member。
+- 初回: ユーザー0人のとき /setup で最初の管理者を作成(SETUP_CODE が設定されていればその入力が必須。Secret Manager の EIGYO_SITE_PASSWORD を流用)。
+- セッション: 署名付きクッキー sales_session(30日)。鍵は SESSION_SECRET(Secret Manager EIGYO_SESSION_SECRET)、無ければ DATA_DIR/session-secret を自動生成。
+- API: GET /api/me、POST /api/me/password {current,next}、管理者のみ GET/POST /api/users、PUT/DELETE /api/users/:id(自分の削除・最後の管理者の降格/削除は拒否)。
+- ログイン失敗は IP ごとに 3 回目から待ち時間。/api/status に user を含め、設定画面の「アカウント」カードで表示・パスワード変更・メンバー管理を行う。
+- ローカル(起動.command)では AUTH_REQUIRED 未設定のため認証なし。

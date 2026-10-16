@@ -117,17 +117,86 @@ App.register('settings', {
         h('p',{class:'small muted', style:{marginTop:'8px'}}, hint),
         h('div',{class:'row mt'}, syncBtn,
           st.needLogin ? h('a',{class:'btn', href:'/login'}, 'ログインする') : null,
-          (st.auth && st.checked) ? h('a',{class:'btn', href:'/logout', onClick: async(e)=>{ e.preventDefault(); if (await UI.confirm('ログアウトしますか?(データは残ります。次回は合言葉の入力が必要です)', {ok:'ログアウト', danger:false})) location.href = '/logout'; }}, 'ログアウト') : null)
+          null)
       );
     }
-    drawSync();
-    offSync = Sync.on(drawSync);
+
+    /* ---------- アカウント(名前+パスワード) ---------- */
+    const accountBox = h('div',{class:'card'});
+    async function api(path, opts={}){
+      const res = await fetch(path, Object.assign({ cache:'no-store', headers:{'Content-Type':'application/json'} }, opts));
+      let j=null; try { j = await res.json(); } catch(e){}
+      if (!res.ok) throw new Error((j&&j.error) || `エラー (${res.status})`);
+      return j;
+    }
+    async function drawAccount(){
+      UI.clear(accountBox);
+      const st = Sync.state();
+      if (st.mode !== 'server' || !st.online || !st.auth) { accountBox.style.display='none'; return; }
+      accountBox.style.display='';
+      const me = st.user || {};
+      const roleLabel = me.role === 'admin' ? '管理者' : 'メンバー';
+      const pwCur = input({type:'password', autocomplete:'current-password', placeholder:'現在のパスワード'});
+      const pwNew = input({type:'password', autocomplete:'new-password', placeholder:'新しいパスワード(8文字以上)'});
+      const pwNew2 = input({type:'password', autocomplete:'new-password', placeholder:'新しいパスワード(確認)'});
+      const changeBtn = h('button',{class:'btn', onClick: async()=>{
+        if (pwNew.value !== pwNew2.value){ toast('確認用のパスワードが一致しません', {error:true}); return; }
+        changeBtn.disabled = true;
+        try { await api('api/me/password', { method:'POST', body: JSON.stringify({ current: pwCur.value, next: pwNew.value }) }); toast('パスワードを変更しました'); pwCur.value=pwNew.value=pwNew2.value=''; }
+        catch(e){ toast(e.message, {error:true}); } finally { changeBtn.disabled=false; }
+      }}, 'パスワードを変更');
+      accountBox.append(
+        h('h2',null,'アカウント'),
+        h('div',{class:'row'}, h('span',null, `ログイン中: `, h('b',null, me.displayName||me.name||''), h('span',{class:'small muted'}, ` (${me.name||''} / ${roleLabel})`)),
+          h('span',{style:{flex:1}}),
+          h('a',{class:'btn sm', href:'/logout', onClick: async(e)=>{ e.preventDefault(); if (await UI.confirm('ログアウトしますか?(データは残ります。次回はログイン名とパスワードの入力が必要です)', {ok:'ログアウト', danger:false})) location.href = '/logout'; }}, 'ログアウト')),
+        h('details',{class:'mt'}, h('summary',null,'パスワードを変更する'),
+          h('div',{class:'form mt'}, h('div',{class:'f-row c3'}, pwCur, pwNew, pwNew2), h('div',null, changeBtn)))
+      );
+      if (me.role === 'admin'){
+        const list = h('div',{class:'list mt'});
+        const nameInp = input({placeholder:'ログイン名(半角英数字)', autocapitalize:'off'});
+        const dispInp = input({placeholder:'表示名(例: 山田 太郎)'});
+        const pwInp = input({type:'password', autocomplete:'new-password', placeholder:'初期パスワード(8文字以上)'});
+        const roleSel = select([['member','メンバー'],['admin','管理者']], 'member');
+        const addBtn = h('button',{class:'btn primary', onClick: async()=>{
+          addBtn.disabled = true;
+          try { await api('api/users', { method:'POST', body: JSON.stringify({ name:nameInp.value.trim(), displayName:dispInp.value.trim(), password:pwInp.value, role:roleSel.value }) }); toast(`「${dispInp.value||nameInp.value}」を追加しました。ログイン名と初期パスワードを本人に伝えてください`, {ms:6000}); nameInp.value=dispInp.value=pwInp.value=''; refreshUsers(); }
+          catch(e){ toast(e.message, {error:true}); } finally { addBtn.disabled=false; }
+        }}, '＋ メンバーを追加');
+        async function refreshUsers(){
+          UI.clear(list);
+          try {
+            const { users } = await api('api/users');
+            for (const u of users){
+              list.appendChild(h('div',{class:'file-row'},
+                h('span',null, u.role==='admin' ? '🛡️' : '👤'),
+                h('div',{class:'nm'}, h('b',null,u.displayName), h('span',{class:'small muted'}, ` ${u.name} / ${u.role==='admin'?'管理者':'メンバー'}`), h('div',{class:'small muted'}, u.lastLoginAt ? `最終ログイン ${UI.fmtDateTime(u.lastLoginAt)}` : '未ログイン')),
+                h('button',{class:'btn sm', onClick: async()=>{ const pw = await UI.prompt(`${u.displayName} の新しいパスワード`, {label:'8文字以上', type:'password'}); if (pw===null) return; try { await api(`api/users/${u.id}`, { method:'PUT', body: JSON.stringify({ password: pw }) }); toast('パスワードを再設定しました。本人に伝えてください'); } catch(e){ toast(e.message,{error:true}); } }}, 'パスワード再設定'),
+                h('button',{class:'btn sm', onClick: async()=>{ const r = u.role==='admin' ? 'member' : 'admin'; if (!(await UI.confirm(`${u.displayName} を${r==='admin'?'管理者':'メンバー'}にしますか?`, {ok:'変更', danger:false}))) return; try { await api(`api/users/${u.id}`, { method:'PUT', body: JSON.stringify({ role: r }) }); refreshUsers(); } catch(e){ toast(e.message,{error:true}); } }}, u.role==='admin' ? 'メンバーにする' : '管理者にする'),
+                u.id !== me.id ? h('button',{class:'btn sm danger', onClick: async()=>{ if (!(await UI.confirm(`${u.displayName}(${u.name})を削除しますか? 本人はログインできなくなります(入力済みのデータは残ります)。`))) return; try { await api(`api/users/${u.id}`, { method:'DELETE' }); toast('削除しました'); refreshUsers(); } catch(e){ toast(e.message,{error:true}); } }}, '削除') : null
+              ));
+            }
+          } catch(e){ list.appendChild(h('div',{class:'small muted'}, '一覧を取得できませんでした: '+e.message)); }
+        }
+        accountBox.append(
+          h('h3',{class:'mt'}, 'メンバー管理(管理者のみ)'),
+          h('p',{class:'small muted'}, 'メンバーを追加すると、そのログイン名と初期パスワードでログインできます。本人は設定画面でパスワードを変更できます。'),
+          h('div',{class:'form'}, h('div',{class:'f-row'}, nameInp, dispInp), h('div',{class:'f-row'}, pwInp, roleSel), h('div',null, addBtn)),
+          list
+        );
+        refreshUsers();
+      }
+    }
+    drawSync(); drawAccount();
+    offSync = Sync.on(()=>{ drawSync(); drawAccount(); });
 
     const counts = Store.COLS.map(c=>`${({customers:'顧客',events:'予定',routes:'ルート',hotels:'ホテル',cars:'レンタカー',reports:'日報',groups:'団体表'})[c]}: ${Store.list(c).length}`).join(' / ');
     root.append(
       h('div',{class:'page-head'}, h('h1',null,'⚙️ 設定')),
       h('div',{class:'card'}, h('h2',null,'基本設定'), form, h('div',{class:'row mt'}, saveBtn)),
       syncBox,
+      accountBox,
       h('div',{class:'card'}, h('h2',null,'バックアップ'),
         h('p',{class:'small muted'}, (Sync.state().mode==='server') ? 'データはこの端末と同期サーバーの両方に保存されています。念のための保存(バックアップ)には、JSONを書き出して保管してください(添付ファイルは含まれません)。' : 'データはこのブラウザ内に保存されています。別の端末で使う場合や念のための保存には、JSONを書き出して保管してください(添付ファイルは含まれません)。'),
         h('p',{class:'small muted'}, counts),
