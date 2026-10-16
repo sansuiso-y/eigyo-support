@@ -280,6 +280,8 @@ details.fold summary{cursor:pointer;color:var(--muted);font-size:.9rem;padding:6
 /* plan page */
 .plan-tbl input[type=text]{min-height:34px;padding:5px 8px}
 .plan-tbl td{padding:4px 6px}
+.plan-tbl select{min-width:120px;width:auto}
+.plan-tbl a.badge{text-decoration:none}
 .plan-tbl tr.muted td input{opacity:.6}
 .stop .ctl select.sm{padding:4px 6px;min-height:30px;width:auto;font-size:.8rem}
 

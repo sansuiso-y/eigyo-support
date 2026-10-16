@@ -211,30 +211,37 @@
       function renderList(){
         UI.clear(listEl);
         const cats = [...new Set(state.rows.map(r=>r.category).filter(Boolean))];
+        const regCount = state.rows.filter(r=>(r.customerId && Store.get('customers', r.customerId)) || findCustomer(r)).length;
         const chips = h('div',{class:'chip-row'},
           h('button',{class:'chip'+(!state.filter?' active':''), onClick:()=>{ state.filter=''; renderList(); }}, `すべて (${state.rows.length})`),
-          cats.map(c=>h('button',{class:'chip'+(state.filter===c?' active':''), onClick:()=>{ state.filter=c; renderList(); }}, `${c} (${state.rows.filter(r=>r.category===c).length})`)));
-        const visible = state.rows.filter(r=>!state.filter || r.category===state.filter);
+          cats.map(c=>h('button',{class:'chip'+(state.filter===c?' active':''), onClick:()=>{ state.filter=c; renderList(); }}, `${c} (${state.rows.filter(r=>r.category===c).length})`)),
+          h('span',{class:'small muted', style:{alignSelf:'center'}}, `名刺: 登録済 ${regCount} / 未登録 ${state.rows.length-regCount}`));
+        const visible = state.rows.filter(r=>(!state.filter || r.category===state.filter) && (!state.onlyNew || !((r.customerId && Store.get('customers', r.customerId)) || findCustomer(r))));
         const checkedCount = state.rows.filter(r=>r.checked).length;
         const tools = h('div',{class:'row mt'},
           h('button',{class:'btn sm', onClick:()=>{ visible.forEach(r=>r.checked=true); saveDraft(); renderList(); }}, '表示中を選択'),
           h('button',{class:'btn sm', onClick:()=>{ visible.forEach(r=>r.checked=false); saveDraft(); renderList(); }}, '表示中を解除'),
           state.filter ? h('button',{class:'btn sm primary', onClick:()=>{ state.rows.forEach(r=>r.checked = r.category===state.filter); saveDraft(); renderList(); toast(`「${state.filter}」だけを選択しました`); }}, `「${state.filter}」だけ回る`) : null,
           h('span',{class:'small muted'}, `選択 ${checkedCount} 件`),
+          h('label',{class:'row small', style:{gap:'4px'}}, h('input',{type:'checkbox', checked:!!state.onlyNew, onChange:(e)=>{ state.onlyNew=e.target.checked; saveDraft(); renderList(); }}), '名刺に未登録の行だけ表示'),
           h('span',{style:{flex:1}}),
           h('button',{class:'btn sm', onClick:lookupAddresses, title:'住所が空の行について、会社名からAIがWeb検索で所在地を調べます(要確認)'}, '🌐 AIで住所を調べる'),
           h('button',{class:'btn sm', onClick:geocodeAll}, '📍 選択行の座標を取得'),
           h('button',{class:'btn sm', onClick:registerCustomers}, '👤 選択行を名刺に登録'),
+          h('button',{class:'btn sm danger', disabled: !checkedCount, onClick: async()=>{ const n = state.rows.filter(r=>r.checked).length; if (!n) return; if (await UI.confirm(`チェックした ${n} 件をリストから削除しますか?(名刺の登録は消えません)`)){ state.rows = state.rows.filter(r=>!r.checked); saveDraft(); renderList(); toast(`${n}件を削除しました`); } }}, '🗑 選択行を削除'),
           h('button',{class:'btn sm danger', onClick: async()=>{ if (await UI.confirm('リストをすべて消しますか?')){ state.rows=[]; state.plan=null; saveDraft(); renderList(); renderPlan(); } }}, 'リストを消す')
         );
         if (!state.rows.length){ listEl.append(UI.empty('まだ訪問先がありません。上のボタンから写真・PDF・Excel・名刺を取り込むか、手入力で追加してください。')); return; }
-        const tbl = h('table',{class:'tbl plan-tbl'}, h('thead',null, h('tr',null, ['','会社名','氏名','役職','区分','電話','住所','希望日','時間帯','滞在','座標',''].map(t=>h('th',null,t)))));
+        const tbl = h('table',{class:'tbl plan-tbl'}, h('thead',null, h('tr',null, ['','名刺','会社名','氏名','役職','区分','電話','住所','希望日','時間帯','滞在','座標',''].map(t=>h('th',null,t)))));
         const tb = h('tbody');
         const cell = (r,k,attrs={}) => h('td',null, h('input',Object.assign({type:'text', value:r[k]||'', onChange:(e)=>{ r[k]=e.target.value; if (k==='address'){ r.lat=null; r.lng=null; } saveDraft(); } }, attrs)));
         for (const r of visible){
+          const cust = (r.customerId && Store.get('customers', r.customerId)) || findCustomer(r) || null;
+          if (cust && !r.customerId) r.customerId = cust.id;
           const catSel = h('select',{onChange:(e)=>{ r.category=e.target.value; saveDraft(); renderList(); }}, [['','(なし)'], ...CATS.map(c=>[c,c]), ...(r.category && !CATS.includes(r.category) ? [[r.category, r.category]] : [])].map(([v,l])=>h('option',{value:v, selected:v===r.category}, l)));
           tb.appendChild(h('tr',{class: r.checked?'':'muted'},
             h('td',null, h('input',{type:'checkbox', checked:r.checked, onChange:(e)=>{ r.checked=e.target.checked; saveDraft(); }})),
+            h('td',{class:'nowrap'}, cust ? h('a',{class:'badge done', href:`#/customers?id=${cust.id}`, title:`名刺を開く: ${S.customerLabel(cust)}`}, '登録済') : h('span',{class:'badge planned', title:'名刺に未登録。「選択行を名刺に登録」で登録できます'}, '未登録')),
             cell(r,'company',{style:{minWidth:'140px'}}), cell(r,'name',{style:{minWidth:'100px'}}), cell(r,'title',{style:{minWidth:'80px'}}),
             h('td',null, catSel),
             cell(r,'phone',{style:{minWidth:'110px'}}),
@@ -394,7 +401,7 @@
             const row = it?.rows?.[i];
             list.appendChild(h('div',{class:'stop'},
               h('span',{class:'num'}, i+1),
-              h('div',{class:'main'}, h('div',null, s.label, s.name ? h('span',{class:'small muted'}, ` / ${s.name}`) : null),
+              h('div',{class:'main'}, h('div',null, s.label, s.name ? h('span',{class:'small muted'}, ` / ${s.name}`) : null, s.customerId && Store.get('customers', s.customerId) ? h('a',{class:'tag', href:`#/customers?id=${s.customerId}`, title:'名刺を開く'}, '名刺') : null),
                 h('div',{class:'sub'}, row ? `${fmtT(row.arr)} 着 → ${fmtT(row.dep)} 発 ・ 移動 ${UI.fmtMin(row.legMin)} ${row.legKm?`(${row.legKm.toFixed(1)}km)`:''}${row.wait?` ・ 待ち${UI.fmtMin(row.wait)}`:''}` : '', s.timeFrom||s.timeTo ? h('span',{class: row?.late?'text-danger':'', style:{marginLeft:'4px'}}, `[希望 ${s.timeFrom||''}〜${s.timeTo||''}${row?.late?' 遅れ':''}]`) : null, s.date ? h('span',{class:'tag'}, '日指定') : null, s.address ? ` ・ ${s.address}` : '')),
               h('div',{class:'ctl'},
                 h('button',{class:'btn sm', disabled:i===0, onClick:()=>{ [day.stops[i-1],day.stops[i]]=[day.stops[i],day.stops[i-1]]; recompute(day); }}, '↑'),
