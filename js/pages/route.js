@@ -36,6 +36,7 @@ App.register('route', {
     /* ---------- 要素 ---------- */
     const dateInp = input({type:'date', value:state.date, onChange:(e)=>{ state.date = e.target.value; }});
     const loadBtn = h('button',{class:'btn', onClick:()=>loadFromEvents()}, '📅 この日の訪問予定から読み込む');
+    const planLink = h('a',{class:'btn', href:'#/plan'}, '🧭 複数日の営業計画を作る');
     const startBox = h('div');
     const startAddrInp = input({placeholder:'出発地の住所(例: 福島県福島市…)', onKeydown:(e)=>{ if(e.key==='Enter') useAddress(); }});
     const custOpts = App.Shared.customerOptions(false);
@@ -423,7 +424,7 @@ App.register('route', {
         h('div',null,
           h('div',{class:'card'}, h('h2',null,'1. 日付と出発地'),
             h('div',{class:'form'},
-              h('div',{class:'row'}, h('div',{style:{flex:'1', minWidth:'160px'}}, dateInp), loadBtn),
+              h('div',{class:'row'}, h('div',{style:{flex:'1', minWidth:'160px'}}, dateInp), loadBtn, planLink),
               h('div',{class:'small muted'}, '読み込み対象: その日の予定(移動・キャンセルを除く)で住所または座標があるもの'),
               field('出発地', startBox))),
           h('div',{class:'card'}, h('h2',null,'2. 訪問先を追加'),

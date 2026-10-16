@@ -6,6 +6,11 @@
  *   node server.js 9000       → ポートを変える
  *   PORT=9000 node server.js  → 同上
  *
+ * 環境変数:
+ *   DATA_DIR      … 保存先ディレクトリ(未指定なら ./data)。Cloud Run では GCS バケットを /data にマウントして指定
+ *   SITE_PASSWORD … 設定すると合言葉ログインが有効になる(未設定ならローカル利用向けに認証なし)
+ *   TRUST_PROXY=1 … リバースプロキシ(Cloud Run)配下: Secure クッキー、X-Forwarded-For を信頼
+ *
  * 役割:
  *   - index.html / css / js をそのまま配信する
  *   - /api/data   … 構造化データ(JSON全体)の GET / PUT、/api/data/<collection> の PUT
@@ -17,15 +22,22 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
+const AI = require('./ai');            // 写真/PDFの読み取り・AI注文(GEMINI_API_KEY 設定時のみ)
 
 const ROOT = __dirname;
-const DATA_DIR = path.join(ROOT, 'data');
+const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(ROOT, 'data'));
 const FILES_DIR = path.join(DATA_DIR, 'files');
 const DATA_JSON = path.join(DATA_DIR, 'data.json');
 const FILES_JSON = path.join(DATA_DIR, 'files.json');
 const PORT = Number(process.argv[2] || process.env.PORT || 8765);
 const MAX_BODY = 200 * 1024 * 1024; // 200MB(添付の上限)
 const COLS = ['customers','events','routes','hotels','cars','reports','groups'];
+const SITE_PASSWORD = process.env.SITE_PASSWORD || '';
+const AUTH = SITE_PASSWORD.length > 0;
+const TRUST_PROXY = process.env.TRUST_PROXY === '1';
+const COOKIE = 'sales_auth';
+const COOKIE_DAYS = 30;
 
 const MIME = {
   '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8',
@@ -40,11 +52,14 @@ fs.mkdirSync(FILES_DIR, { recursive: true });
 function readJson(file, fallback){
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch(e){ return fallback; }
 }
-function writeJsonAtomic(file, obj){
+function writeAtomic(file, data){
+  // tmp → rename でアトミックに。gcsfuse 等で rename に失敗したら直接書く
+  try { fs.mkdirSync(path.dirname(file), { recursive: true }); } catch(e){}
   const tmp = file + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 1));
-  fs.renameSync(tmp, file);
+  try { fs.writeFileSync(tmp, data); fs.renameSync(tmp, file); }
+  catch(e){ try { fs.unlinkSync(tmp); } catch(_){} fs.writeFileSync(file, data); }
 }
+function writeJsonAtomic(file, obj){ writeAtomic(file, JSON.stringify(obj, null, 1)); }
 
 let data = readJson(DATA_JSON, null);           // { version, settings, data:{col:[...]}, updatedAt }
 let filesMeta = readJson(FILES_JSON, {});       // { id: {id,name,type,size,linkedKind,linkedId,createdAt,updatedAt} }
@@ -86,13 +101,80 @@ function readBody(req, limit=MAX_BODY){
 }
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
+/* ---------- 合言葉ログイン(SITE_PASSWORD 設定時のみ) ---------- */
+const KEY = crypto.createHash('sha256').update('sales-support-cookie:' + SITE_PASSWORD).digest();
+function sign(s){ return crypto.createHmac('sha256', KEY).update(s).digest('hex'); }
+function makeToken(){ const exp = Date.now() + COOKIE_DAYS*86400000; const p = String(exp); return p + '.' + sign(p); }
+function safeEqual(a, b){
+  const ha = crypto.createHash('sha256').update(String(a)).digest(), hb = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+function parseCookies(req){
+  const out = {};
+  (req.headers.cookie || '').split(';').forEach(kv=>{ const i = kv.indexOf('='); if (i>0){ try { out[kv.slice(0,i).trim()] = decodeURIComponent(kv.slice(i+1).trim()); } catch(e){} } });
+  return out;
+}
+function isAuthed(req){
+  if (!AUTH) return true;
+  const tok = parseCookies(req)[COOKIE] || '';
+  const i = tok.indexOf('.'); if (i <= 0) return false;
+  const exp = tok.slice(0, i), sig = tok.slice(i+1);
+  if (!/^\d+$/.test(exp) || Number(exp) < Date.now()) return false;
+  return safeEqual(sign(exp), sig);
+}
+function cookieHeader(value, maxAge){
+  return `${COOKIE}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}` + (TRUST_PROXY ? '; Secure' : '');
+}
+function clientIp(req){
+  if (TRUST_PROXY){ const xf = req.headers['x-forwarded-for']; if (xf) return String(xf).split(',')[0].trim(); }
+  return req.socket.remoteAddress || '';
+}
+const fails = new Map(); // ip → {count, until}
+function loginPage(msg, status=200){
+  const html = `<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ログイン | 営業サポート</title><link rel="stylesheet" href="/css/app.css">
+<style>body{display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:16px;box-sizing:border-box}
+.login{width:100%;max-width:360px}.login h1{font-size:1.3rem;margin:0 0 4px}.login p{margin:0 0 16px}.login input{width:100%;box-sizing:border-box;font-size:1.1rem;padding:12px}
+.login .btn{width:100%;margin-top:12px;font-size:1.05rem;padding:12px}.err{color:var(--danger,#d33b3b);font-weight:600;margin:8px 0 0}</style></head>
+<body><form class="card login" method="post" action="/login"><h1>営業サポート</h1><p class="small muted">合言葉を入力してください</p>
+<input type="password" name="password" autocomplete="current-password" autofocus required placeholder="合言葉">
+${msg ? `<div class="err">${msg}</div>` : ''}<button class="btn primary" type="submit">ログイン</button></form></body></html>`;
+  return [status, html, { 'Content-Type':'text/html; charset=utf-8' }];
+}
+async function handleAuthRoutes(req, res, url){
+  if (url.pathname === '/login'){
+    if (req.method === 'GET'){ if (isAuthed(req)) return redirect(res, '/'); return send(res, ...loginPage('')); }
+    if (req.method === 'POST'){
+      const ip = clientIp(req);
+      const f = fails.get(ip);
+      if (f && f.until > Date.now()) return send(res, ...loginPage(`連続して失敗したため、${Math.ceil((f.until-Date.now())/1000)}秒待ってからやり直してください`, 429));
+      let pw = ''; try { pw = new URLSearchParams((await readBody(req, 64*1024)).toString('utf8')).get('password') || ''; } catch(e){}
+      if (safeEqual(pw, SITE_PASSWORD)){
+        fails.delete(ip);
+        res.writeHead(303, { 'Location':'/', 'Set-Cookie': cookieHeader(makeToken(), COOKIE_DAYS*86400), 'Cache-Control':'no-store' });
+        return res.end();
+      }
+      const n = (f ? f.count : 0) + 1;
+      fails.set(ip, { count:n, until: Date.now() + Math.min(n*2, 30)*1000 });
+      return send(res, ...loginPage('合言葉が違います', 401));
+    }
+    return send(res, 405, 'method not allowed');
+  }
+  if (url.pathname === '/logout'){
+    res.writeHead(302, { 'Location':'/login', 'Set-Cookie': cookieHeader('', 0), 'Cache-Control':'no-store' });
+    return res.end();
+  }
+  return false;
+}
+function redirect(res, to){ res.writeHead(302, { 'Location': to, 'Cache-Control':'no-store' }); res.end(); }
+
 /* ---------- API ---------- */
 async function api(req, res, url){
   const parts = url.pathname.split('/').filter(Boolean); // ['api', 'data', ...]
   const kind = parts[1], sub = parts[2];
 
   if (kind === 'status' && req.method === 'GET'){
-    return send(res, 200, { app:'sales-support', version:1, updatedAt: data ? data.updatedAt : null, files: Object.keys(filesMeta).length });
+    return send(res, 200, { app:'sales-support', version:1, ai: !!process.env.GEMINI_API_KEY, auth: AUTH, updatedAt: data ? data.updatedAt : null, files: Object.keys(filesMeta).length });
   }
 
   if (kind === 'data'){
@@ -102,6 +184,7 @@ async function api(req, res, url){
     }
     if (req.method === 'PUT' && !sub){
       let json; try { json = JSON.parse((await readBody(req)).toString('utf8')); } catch(e){ return send(res, 400, {error:'invalid json'}); }
+      if (!json || typeof json !== 'object' || Array.isArray(json) || !json.data || typeof json.data !== 'object') return send(res, 400, {error:'body must be {settings, data}'});
       data = normalizeData(json);
       saveData();
       return send(res, 200, { ok:true, updatedAt: data.updatedAt });
@@ -113,6 +196,20 @@ async function api(req, res, url){
       else { if (!Array.isArray(json)) return send(res, 400, {error:'collection must be array'}); data.data[sub] = json; }
       saveData();
       return send(res, 200, { ok:true, updatedAt: data.updatedAt });
+    }
+    if (req.method === 'PATCH' && sub && COLS.includes(sub)){
+      // レコード単位の更新: {upsert:[{id,...}], delete:[id]}。同じ id は後に届いた方が勝つ
+      let json; try { json = JSON.parse((await readBody(req)).toString('utf8')); } catch(e){ return send(res, 400, {error:'invalid json'}); }
+      if (!json || typeof json !== 'object' || Array.isArray(json)) return send(res, 400, {error:'body must be {upsert, delete}'});
+      const upsert = Array.isArray(json.upsert) ? json.upsert : [], del = Array.isArray(json.delete) ? json.delete : [];
+      if (!data) data = emptyData();
+      const map = new Map(data.data[sub].filter(x=>x && x.id).map(x=>[x.id, x]));
+      let n = 0;
+      upsert.forEach(x=>{ if (x && typeof x === 'object' && typeof x.id === 'string'){ map.set(x.id, x); n++; } });
+      del.forEach(id=>{ if (typeof id === 'string' && map.delete(id)) n++; });
+      data.data[sub] = Array.from(map.values());
+      saveData();
+      return send(res, 200, { ok:true, applied:n, updatedAt: data.updatedAt });
     }
     return send(res, 405, {error:'method not allowed'});
   }
@@ -133,7 +230,7 @@ async function api(req, res, url){
       let buf; try { buf = await readBody(req); } catch(e){ return send(res, 413, {error:'too large'}); }
       const prev = filesMeta[sub] || {};
       const hasBody = buf.length > 0 || !fs.existsSync(file);
-      if (hasBody){ fs.writeFileSync(file + '.tmp', buf); fs.renameSync(file + '.tmp', file); }
+      if (hasBody) writeAtomic(file, buf);
       const size = fs.statSync(file).size;
       filesMeta[sub] = Object.assign({}, prev, meta, { id: sub, size, type: meta.type || prev.type || req.headers['content-type'] || 'application/octet-stream',
         createdAt: meta.createdAt || prev.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString() });
@@ -155,10 +252,18 @@ async function api(req, res, url){
 /* ---------- 静的ファイル ---------- */
 function serveStatic(req, res, url){
   if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'method not allowed');
-  let p = decodeURIComponent(url.pathname);
+  let p; try { p = decodeURIComponent(url.pathname); } catch(e){ return send(res, 400, 'bad request'); }
   if (p === '/' || p === '') p = '/index.html';
+  if (p.includes('\0')) return send(res, 400, 'bad request');
   const abs = path.normalize(path.join(ROOT, p));
-  if (!abs.startsWith(ROOT + path.sep) || abs.startsWith(DATA_DIR) || abs === path.join(ROOT, 'server.js')) return send(res, 403, 'forbidden');
+  const rel = path.relative(ROOT, abs);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return send(res, 403, 'forbidden');
+  // 配信するのは画面に必要なファイルだけ(data/・.git/・server.js・Dockerfile などは大文字小文字を問わず拒否)
+  const segs = rel.split(path.sep);
+  const top = segs[0].toLowerCase();
+  const allowedTop = segs.length === 1 ? ['index.html','readme.md','design.md'] : ['css','js'];
+  if (!allowedTop.includes(top) || segs.some(sg=>sg.startsWith('.'))) return send(res, 403, 'forbidden');
+  if (segs.length > 1 && !/\.(css|js|json|png|jpg|jpeg|gif|svg|webp|ico|woff2?|txt)$/i.test(segs[segs.length-1])) return send(res, 403, 'forbidden');
   fs.stat(abs, (err, st)=>{
     if (err || !st.isFile()) return send(res, 404, 'not found');
     const type = MIME[path.extname(abs).toLowerCase()] || 'application/octet-stream';
@@ -169,10 +274,22 @@ function serveStatic(req, res, url){
 }
 
 const server = http.createServer((req, res)=>{
-  const url = new URL(req.url, 'http://localhost');
-  if (url.pathname.startsWith('/api/')){
-    api(req, res, url).catch(e=>{ console.error(e); try { send(res, 500, {error: String(e && e.message || e)}); } catch(_){} });
-  } else serveStatic(req, res, url);
+  (async()=>{
+    let url; try { url = new URL(req.url, 'http://localhost'); } catch(e){ return send(res, 400, 'bad request'); }
+    if (AUTH){
+      if (await handleAuthRoutes(req, res, url) !== false) return;
+      if (!isAuthed(req)){
+        if (url.pathname.startsWith('/api/')) return send(res, 401, { error:'unauthorized', login:'/login' });
+        if (url.pathname === '/css/app.css') return serveStatic(req, res, url); // ログイン画面用
+        return redirect(res, '/login');
+      }
+    }
+    if (url.pathname.startsWith('/api/')){
+      if (await AI.handle(req, res, url, { readBody, send })) return;
+      return api(req, res, url);
+    }
+    return serveStatic(req, res, url);
+  })().catch(e=>{ console.error(e); try { send(res, 500, {error: String(e && e.message || e)}); } catch(_){} });
 });
 
 server.on('error', (e)=>{
@@ -190,5 +307,6 @@ server.listen(PORT, '0.0.0.0', ()=>{
   console.log(`  このMacで開く:          http://localhost:${PORT}`);
   ips.forEach(ip=> console.log(`  同じWi-Fiのスマホから:  http://${ip}:${PORT}`));
   console.log(`  データの保存先:          ${DATA_DIR}`);
+  console.log(`  合言葉ログイン:          ${AUTH ? '有効(SITE_PASSWORD)' : '無効(SITE_PASSWORD 未設定)'}`);
   console.log('');
 });

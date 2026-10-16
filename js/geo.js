@@ -6,15 +6,42 @@
   let lastNominatim = 0;
   async function throttle(){ const wait = 1100 - (Date.now()-lastNominatim); if (wait>0) await new Promise(r=>setTimeout(r,wait)); lastNominatim = Date.now(); }
 
+  /* 住所の簡略化候補: 「…, 1층」「…ビル3F」などを落として順に試す */
+  function variants(address){
+    const out = [address];
+    const noFloor = address.replace(/[\s,、]*(\d+\s*(층|階|F|f)|[0-9０-９]+(号室|호))\s*$/u,'').replace(/[\s,、]*(\d+\s*(층|階|F))\b.*$/u,'').trim();
+    if (noFloor && noFloor !== address) out.push(noFloor);
+    const beforeComma = address.split(/[,、]/)[0].trim();
+    if (beforeComma && !out.includes(beforeComma)) out.push(beforeComma);
+    const noParen = beforeComma.replace(/[（(].*?[)）]/g,'').trim();
+    if (noParen && !out.includes(noParen)) out.push(noParen);
+    const noBldg = noParen.replace(/\s*[^\s\d]*?(ビル|ビルヂング|タワー|会館|センター|マンション|ハイツ|プラザ|スクエア|ヒルズ)[^\s]*$/u,'').trim();
+    if (noBldg && !out.includes(noBldg)) out.push(noBldg);
+    return out;
+  }
   async function geocode(address){
     address = (address||'').trim();
     if (!address) return null;
     if (geoCache[address]) return geoCache[address];
-    await throttle();
-    const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=jp&accept-language=ja&q=${encodeURIComponent(address)}`;
-    const res = await fetch(url, {headers:{'Accept':'application/json'}});
-    if (!res.ok) throw new Error('住所検索に失敗しました ('+res.status+')');
-    const arr = await res.json();
+    const cands = variants(address);
+    for (let i=0;i<cands.length;i++){
+      const r = await geocodeOne(cands[i]);
+      if (r){ if (i>0){ r.simplified = cands[i]; geoCache[address] = r; saveCache(); } return r; }
+    }
+    return null;
+  }
+  async function geocodeOne(address){
+    if (geoCache[address]) return geoCache[address];
+    // まず日本国内で検索し、見つからなければ国を限定せずに再検索(海外出張の訪問先向け)
+    let arr = [];
+    for (const cc of ['jp', '']){
+      await throttle();
+      const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1${cc?'&countrycodes='+cc:''}&accept-language=ja&q=${encodeURIComponent(address)}`;
+      const res = await fetch(url, {headers:{'Accept':'application/json'}});
+      if (!res.ok) throw new Error('住所検索に失敗しました ('+res.status+')');
+      arr = await res.json();
+      if (arr.length) break;
+    }
     if (!arr.length) return null;
     const r = { lat: parseFloat(arr[0].lat), lng: parseFloat(arr[0].lon), display: arr[0].display_name };
     geoCache[address] = r; saveCache();

@@ -82,20 +82,26 @@ App.register('settings', {
       UI.clear(syncBox);
       const last = st.lastSyncAt ? UI.fmtDateTime(st.lastSyncAt) : 'まだ同期していません';
       let status, hint;
-      if (st.mode === 'none'){
+      const isLocalServer = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|$)/.test(st.serverUrl);
+      if (st.mode === 'none' || st.mode === 'static'){
         status = h('span',{class:'badge other'}, '端末内のみ');
-        hint = 'index.html を直接開いているため、データはこのブラウザ内だけに保存されます。スマホとPCで同じデータを使うには、README の手順で「node server.js」を起動し、その画面(http://…)から開いてください。';
+        hint = (st.mode === 'none' ? 'index.html を直接開いているため、' : 'この開き方(同期機能のないWebサーバー)では、') + 'データはこのブラウザ内だけに保存されます。スマホやほかの人と同じデータを使うには、共有サイトのアドレスから開いてください。';
+      } else if (st.needLogin){
+        status = h('span',{class:'badge cancelled', style:{textDecoration:'none'}}, 'ログインが必要');
+        hint = 'ログインの有効期限が切れました。もう一度ログインしてください。';
       } else if (!st.checked){
         status = h('span',{class:'badge planned'}, '確認中…');
         hint = 'サーバーに接続できるか確認しています。';
       } else if (st.online){
         status = h('span',{class:'badge booked'}, '接続中');
-        hint = `保存のたびにサーバー(${st.serverUrl})へも書き込み、他の端末の変更は起動時・画面に戻ったとき・30秒ごとに取り込みます。同じ項目を両方で直した場合は、後に保存した方が残ります。`;
+        hint = `保存のたびにサーバー(${st.serverUrl})へも書き込み、ほかの端末・ほかの人の変更は起動時・画面に戻ったとき・30秒ごとに取り込みます。同じ1件を同時に直した場合は、後に送られた方が残ります(別々の件なら両方残ります)。氏名と表示テーマはこの端末だけの設定で、共有されません。`;
       } else {
         status = h('span',{class:'badge cancelled', style:{textDecoration:'none'}}, 'オフライン');
-        hint = 'サーバーに接続できません(端末内には保存されています)。Mac で「node server.js」が動いているか、同じWi-Fiにつながっているかを確認してください。つながると未送信の変更を自動で送ります。' + (st.lastError ? ` [${st.lastError}]` : '');
+        hint = 'サーバーに接続できません(入力した内容は端末内に保存されています)。' +
+          (isLocalServer ? 'Mac で「node server.js」が動いているか、同じWi-Fiにつながっているかを確認してください。' : 'インターネット接続を確認してください。') +
+          'つながると未送信の変更を自動で送ります。' + (st.lastError ? ` [${st.lastError}]` : '');
       }
-      const syncBtn = h('button',{class:'btn primary', disabled: st.mode==='none' || st.syncing, onClick: async()=>{
+      const syncBtn = h('button',{class:'btn primary', disabled: st.mode!=='server' || st.syncing, onClick: async()=>{
         const changed = await Sync.now({reload:true});
         const s2 = Sync.state();
         if (!s2.online) toast('サーバーに接続できませんでした', {error:true});
@@ -109,7 +115,9 @@ App.register('settings', {
           st.pending ? h('span',{class:'small muted'}, `未送信: ${st.pending}件`) : null
         ),
         h('p',{class:'small muted', style:{marginTop:'8px'}}, hint),
-        h('div',{class:'row mt'}, syncBtn)
+        h('div',{class:'row mt'}, syncBtn,
+          st.needLogin ? h('a',{class:'btn', href:'/login'}, 'ログインする') : null,
+          (st.auth && st.checked) ? h('a',{class:'btn', href:'/logout', onClick: async(e)=>{ e.preventDefault(); if (await UI.confirm('ログアウトしますか?(データは残ります。次回は合言葉の入力が必要です)', {ok:'ログアウト', danger:false})) location.href = '/logout'; }}, 'ログアウト') : null)
       );
     }
     drawSync();
@@ -121,13 +129,13 @@ App.register('settings', {
       h('div',{class:'card'}, h('h2',null,'基本設定'), form, h('div',{class:'row mt'}, saveBtn)),
       syncBox,
       h('div',{class:'card'}, h('h2',null,'バックアップ'),
-        h('p',{class:'small muted'},'データはこのブラウザ内に保存されています。別の端末で使う場合や念のための保存には、JSONを書き出して保管してください(添付ファイルは含まれません)。'),
+        h('p',{class:'small muted'}, (Sync.state().mode==='server') ? 'データはこの端末と同期サーバーの両方に保存されています。念のための保存(バックアップ)には、JSONを書き出して保管してください(添付ファイルは含まれません)。' : 'データはこのブラウザ内に保存されています。別の端末で使う場合や念のための保存には、JSONを書き出して保管してください(添付ファイルは含まれません)。'),
         h('p',{class:'small muted'}, counts),
         h('div',{class:'row'},
           h('button',{class:'btn', onClick:()=>{ UI.download(`sales-backup-${UI.today()}.json`, JSON.stringify(Store.exportAll(), null, 2)); toast('書き出しました'); }}, '⬇️ JSONを書き出す'),
           h('button',{class:'btn', onClick:()=>fileInp.click()}, '⬆️ JSONを取り込む'), fileInp,
           h('button',{class:'btn', onClick: async()=>{ if(await UI.confirm('動作確認用のサンプル(顧客5件・予定5件・ホテル1件・団体表1件)を追加します。', {ok:'追加する', danger:false})){ seedDemo(); toast('サンプルを追加しました'); App.route(); } }}, '🧪 サンプルデータを入れる'),
-          h('button',{class:'btn danger', onClick: async()=>{ if(await UI.confirm('すべてのデータ(添付以外)を削除します。元に戻せません。')){ Store.clearAll(); toast('削除しました'); App.route(); } }}, '全データ削除')
+          h('button',{class:'btn danger', onClick: async()=>{ if(await UI.confirm(Sync.state().mode==='server' ? 'すべてのデータ(添付以外)を削除します。同期サーバーとほかの端末からも消え、元に戻せません。' : 'すべてのデータ(添付以外)を削除します。元に戻せません。')){ Store.clearAll(); toast('削除しました'); App.route(); } }}, '全データ削除')
         )
       ),
       h('div',{class:'card'}, h('h2',null,'このサイトについて'),

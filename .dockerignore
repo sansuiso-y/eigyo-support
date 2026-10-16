@@ -1,0 +1,11 @@
+.git
+.gitignore
+.claude
+.dockerignore
+data
+node_modules
+DESIGN.md
+deploy.sh
+起動.command
+*.command
+.DS_Store

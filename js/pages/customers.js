@@ -399,6 +399,7 @@
       search.addEventListener('input', UI.debounce(refresh, 200));
       root.append(
         h('div',{class:'page-head'}, h('h1',null,'👤 顧客・名刺'), h('div',{class:'spacer'}),
+          h('a',{class:'btn', href:'#/plan'}, '🧭 リストから取り込む'),
           h('button',{class:'btn', onClick:exportCsv}, '⬇️ CSV書き出し'),
           h('button',{class:'btn primary', onClick:()=>openEdit(null, {onSaved:(s)=>openDetail(s.id)})}, '＋ 新規')),
         h('div',{class:'card compact'},
