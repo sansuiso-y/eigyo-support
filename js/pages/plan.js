@@ -118,6 +118,7 @@
     const res = await fetch('api/extract', { method:'POST', headers:{ 'Content-Type': file.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name||'') }, body: file });
     let j = null; try { j = await res.json(); } catch(e){}
     if (!res.ok) throw new Error((j && j.error) || `読み取りに失敗しました (${res.status})`);
+    if (j.note) toast(`AIからの注意: ${j.note}`, { ms: 8000, error: j.total > (j.rows||[]).length });
     return (j.rows||[]).map(r => Object.assign(emptyRow(), { company:r.company||'', name:r.name||'', title:r.title||'', category:r.category||'', phone:r.phone||'', address:r.address||'', memo:r.memo||'' }));
   }
   async function shrinkImage(file){

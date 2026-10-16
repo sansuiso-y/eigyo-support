@@ -15,16 +15,16 @@ async function gemini({ parts, system, schema, tools }){
   const key = process.env.GEMINI_API_KEY;
   if (!key){ const e = new Error('AI機能はクラウド版でのみ使えます(GEMINI_API_KEY 未設定)'); e.status = 503; throw e; }
   let lastErr = null;
-  for (const model of MODELS){
+  for (const model of MODELS) for (let attempt = 0; attempt < 2; attempt++){ // 応答が途中で切れた/解釈できないときは同じモデルでもう1回、だめなら次のモデルへ
     const body = { contents:[{ role:'user', parts }], generationConfig:{ maxOutputTokens: 16000, temperature: 0.1, responseMimeType:'application/json', ...(schema ? { responseSchema: schema } : {}) } };
     if (system) body.systemInstruction = { parts:[{ text: system }] };
     if (tools){ body.tools = tools; delete body.generationConfig.responseMimeType; delete body.generationConfig.responseSchema; } // 検索ツール併用時はJSONモード不可
     const ctl = new AbortController(); const timer = setTimeout(()=>ctl.abort(), 90000);
     let res;
     try { res = await fetch(`${BASE}/models/${model}:generateContent`, { method:'POST', headers:{ 'Content-Type':'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body), signal: ctl.signal }); }
-    catch(err){ clearTimeout(timer); lastErr = new Error(err.name==='AbortError' ? 'AIの応答が時間内に返りませんでした' : 'AIに接続できませんでした'); lastErr.status = 504; continue; }
+    catch(err){ clearTimeout(timer); lastErr = new Error(err.name==='AbortError' ? 'AIの応答が時間内に返りませんでした' : 'AIに接続できませんでした'); lastErr.status = 504; break; } // 次のモデルへ(同じモデルには再送しない)
     clearTimeout(timer);
-    if (res.status === 404 || res.status >= 500){ lastErr = new Error(res.status===404 ? `モデル ${model} が見つかりません` : `AIが混み合っています (${res.status})`); lastErr.status = 502; continue; } // 次のモデルへ
+    if (res.status === 404 || res.status >= 500){ lastErr = new Error(res.status===404 ? `モデル ${model} が見つかりません` : `AIが混み合っています (${res.status})`); lastErr.status = 502; break; } // 次のモデルへ
     if (!res.ok){
       let detail=''; try { detail = (await res.json()).error?.message || ''; } catch(e){}
       const e = new Error(res.status===429 ? 'AIの利用上限に達しました。少し待ってからお試しください' : `AIエラー (${res.status}) ${detail}`.trim()); e.status = res.status===429?429:502; throw e;
@@ -32,10 +32,11 @@ async function gemini({ parts, system, schema, tools }){
     const data = await res.json();
     const text = (data.candidates?.[0]?.content?.parts || []).map(p=>p.text||'').join('');
     const finish = data.candidates?.[0]?.finishReason || '';
-    if (!text){ const e = new Error('AIの応答が空でした (' + (finish || data.promptFeedback?.blockReason || '不明') + ')'); e.status = 502; throw e; }
-    const parsed = parseJson(text);
+    if (!text && finish !== 'MAX_TOKENS'){ const e = new Error('AIの応答が空でした (' + (finish || data.promptFeedback?.blockReason || '不明') + ')'); e.status = 502; throw e; }
+    const parsed = finish === 'MAX_TOKENS' ? null : parseJson(text); // 思考だけで上限に達して本文が空のときも、ここで取り直しに回す // 途中で切れた応答は(たまたま解釈できても)使わない: 同じ内容を繰り返す異常出力のことがある
     if (parsed) return parsed;
-    const e = new Error(finish === 'MAX_TOKENS' ? '資料が長すぎてAIの応答が途中で切れました。ページを分けて取り込んでください' : 'AIの応答を解釈できませんでした'); e.status = 502; throw e;
+    lastErr = new Error(finish === 'MAX_TOKENS' ? '資料が長すぎてAIの応答が途中で切れました。ページを分けて取り込んでください' : 'AIの応答を解釈できませんでした'); lastErr.status = 502;
+    console.error('[ai]', model, 'attempt', attempt+1, finish || '', 'len', text.length, '→ retry');
   }
   throw lastErr || new Error('AIを呼び出せませんでした');
 }
@@ -56,7 +57,7 @@ function parseJson(text){
 
 const ROW_SCHEMA = { type:'OBJECT', properties:{ rows:{ type:'ARRAY', items:{ type:'OBJECT', properties:{
   company:{type:'STRING'}, name:{type:'STRING'}, title:{type:'STRING'}, category:{type:'STRING'}, phone:{type:'STRING'}, address:{type:'STRING'}, memo:{type:'STRING'} } } },
-  note:{type:'STRING'} }, required:['rows'] };
+  total:{type:'INTEGER', description:'資料に載っている人(行)の総数'}, note:{type:'STRING'} }, required:['rows','total'] };
 
 async function extract(buffer, mime, fileName){
   if (!buffer || !buffer.length){ const e = new Error('ファイルが空です'); e.status=400; throw e; }
@@ -66,16 +67,31 @@ async function extract(buffer, mime, fileName){
   if (!mimeType || mimeType==='application/octet-stream'){ mimeType = ({jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',webp:'image/webp',heic:'image/heic',heif:'image/heif',pdf:'application/pdf',gif:'image/gif'})[ext] || 'image/jpeg'; }
   const system = `あなたは営業アシスタントです。渡された画像やPDFに含まれる「会社・団体・人物の一覧」を読み取り、営業訪問先リストとしてJSONにします。
 ルール:
-- 1人(または1社)につき1行。company(会社名・団体名)、name(氏名。原文の表記をそのまま。ローマ字併記があれば「原文 (ローマ字)」)、title(役職)、category(区分: 旅行会社 / 法人 / 自治体・関係機関 / メディア / 団体 / その他 のいずれか。表に区分があればそれに従う)、phone(電話番号)、address(住所。書いてあるものだけ。推測しない)、memo(備考欄などの補足)。
+- 1人(または1社)につき1行。資料に載っている人は全員、省略せずに rows に入れる(20人なら20行)。total には資料に載っている人(行)の総数を入れる。
+- company(会社名・団体名。原文の表記をそのまま。韓国語・英語などを日本語に翻訳しない)、name(氏名。原文の表記をそのまま。ローマ字併記があれば「原文 (ローマ字)」)、title(役職)、category(区分: 旅行会社 / 法人 / 自治体・関係機関 / メディア / 団体 / その他 のいずれか。表に区分があればそれに従う)、phone(電話番号)、address(住所。書いてあるものだけ。推測しない)、memo(備考欄などの補足)。
 - パスポート番号・生年月日・性別・部屋番号・個人のメールアドレスは読み取らず、どの項目にも入れない。
 - 同じ会社の人が複数いても、それぞれ1行にする。
 - 読み取れない項目は空文字にする。表以外の説明文は rows に含めない。note に、読み取りで気になった点(かすれ・不明瞭など)を日本語で短く書く(なければ空)。`;
-  const parts = [ { inlineData:{ mimeType, data: buffer.toString('base64') } }, { text:'この資料の一覧を読み取って、rows の配列にしてください。' } ];
-  const out = await gemini({ parts, system, schema: ROW_SCHEMA });
-  const rows = (Array.isArray(out.rows) ? out.rows : []).map(r=>({
-    company: str(r.company), name: str(r.name), title: str(r.title), category: str(r.category), phone: str(r.phone), address: str(r.address), memo: str(r.memo)
-  })).filter(r=>r.company || r.name);
-  return { rows, note: str(out.note) };
+  const parts = [ { inlineData:{ mimeType, data: buffer.toString('base64') } }, { text:'この資料の一覧を読み取って、全員を rows の配列にしてください。' } ];
+  const clean = out => ({ rows: (Array.isArray(out.rows) ? out.rows : []).filter(r=>r && typeof r === 'object').map(r=>({
+      company: str(r.company).slice(0,200), name: str(r.name).slice(0,200), title: str(r.title).slice(0,200), category: str(r.category).slice(0,50), phone: str(r.phone).slice(0,60), address: str(r.address).slice(0,300), memo: str(r.memo).slice(0,500)
+    })).filter(r=>r.company || r.name), total: Math.max(0, Math.floor(Number(out.total)) || 0), note: str(out.note) });
+  // AIが途中で読むのをやめて数行しか返さないことがある → 自己申告の総数(total)と行数を比べ、足りなければ最大3回まで取り直して一番多いものを使う
+  // 取り直しは、開始から90秒以内に始められるときだけ(Cloud Run の 300 秒上限を超えないように)。2回目以降で失敗しても、それまでの結果は返す
+  const t0 = Date.now(); let best = null, total = 0;
+  for (let i = 0; i < 3; i++){
+    let out;
+    try { out = clean(await gemini({ parts, system, schema: ROW_SCHEMA })); }
+    catch(e){ if (best){ console.error('[ai] extract: retry failed, keeping', best.rows.length, 'rows:', e.message); break; } throw e; }
+    total = Math.max(total, out.total);
+    if (!best || out.rows.length > best.rows.length) best = out;
+    if (best.rows.length >= total) break;
+    console.error('[ai] extract: rows', out.rows.length, '< total', total, '→ retry', i+1, `(${Math.round((Date.now()-t0)/1000)}s)`);
+    if (Date.now() - t0 > 90000) break;
+  }
+  best.total = total;
+  const short = best.total > best.rows.length;
+  return { rows: best.rows, total: best.total, note: short ? `資料には約${best.total}件ありますが${best.rows.length}件しか読み取れませんでした。写真を撮り直すか、ページを分けて取り込んでください。` + (best.note ? ' ' + best.note : '') : best.note };
 }
 
 
