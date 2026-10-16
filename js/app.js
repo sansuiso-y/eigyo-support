@@ -53,6 +53,7 @@
     document.addEventListener('click', (e)=>{ const nav=document.getElementById('sidenav'); if(nav.classList.contains('open') && !nav.contains(e.target) && e.target.id!=='nav-toggle') nav.classList.remove('open'); });
     window.addEventListener('hashchange', route);
     Store.on('settings', ()=>{ applyTheme(); renderTopbar(); });
+    if (window.Sync) Sync.on(renderTopbar);
     renderTopbar();
     route();
   }
@@ -62,6 +63,11 @@
     UI.clear(r);
     r.appendChild(UI.h('span',{class:'nowrap small'}, UI.fmtDate(UI.today(), {year:true})));
     if (s.userName) r.appendChild(UI.h('span',{class:'nowrap small'}, s.userName));
+    const st = window.Sync ? Sync.state() : null;
+    if (st && st.mode === 'server' && st.checked){
+      r.appendChild(UI.h('a',{href:'#/settings', class:'nowrap small sync-dot', title: st.online ? '同期サーバーに接続中' : 'オフライン(端末内に保存中)'},
+        st.online ? '🟢' : '🔴', UI.h('span',{class:'sync-label'}, st.online ? ' 同期' : ' オフライン')));
+    }
   }
 
   /* shared helpers used by several pages */

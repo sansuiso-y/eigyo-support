@@ -29,10 +29,12 @@
 - 経路距離・時間: OSRM公開デモサーバー(失敗時は直線距離×1.3で推定)
 - 名刺OCR: Tesseract.js(CDN、日本語+英語、任意機能)
 - 保存: localStorage(構造化データ) + IndexedDB(添付ファイル・名刺画像)
+- 同期(任意): 同じフォルダの `server.js`(Node.js、依存なし)が index.html を配信しつつ `/api/data` と `/api/files` を提供。`js/store.js` 内の `Sync` が、サーバーがあれば保存のたびにサーバーへも書き、起動時・画面復帰時・30秒ごと・「今すぐ同期」でサーバーから読み直す。サーバーが無い/落ちている場合は従来どおり端末内のみで動く(フォールバック)。
 
 ## できないこと(正直に)
 - ホテル・レンタカーの**実際の予約**は各社サイトで行う(本サイトは条件付きで検索ページを開き、結果を記録する)。
-- データは端末のブラウザ内のみ。別端末と共有するには設定画面からJSONをエクスポート/インポート。
+- 同期サーバー無しの場合、データは端末のブラウザ内のみ。別端末と共有するには `node server.js` を起動して同じWi-Fiから開くか、設定画面からJSONをエクスポート/インポート。
+- 同期の競合解決は「最後に保存した方が勝つ」(コレクション単位・ファイル単位)。同時編集の自動マージはしない。
 
 ## データモデル(localStorage key: `sales.<collection>`)
 ```
@@ -54,3 +56,24 @@ attachments (IndexedDB 'files'): {id, name, type, size, blob, linkedKind, linked
 - `Geo.geocode(address)`→{lat,lng}、`Geo.route(points)`→{distanceKm, durationMin, geometry}、`Geo.optimize(start, stops, {roundTrip, fixedLast})`→`{order:[元index], stops:[並び替え済み], matrix}`、`Geo.gmapsUrl(points)`
 - 添付の紐付けは Files の linkedKind/linkedId で管理(各モデルの attachmentIds は予備で常に空)。events には出張手配からの重複防止用に hotelId/carId が付くことがある。
 - ページ登録: `App.register('schedule', {title:'スケジュール', icon:'📅', render(root, params){...}})`
+
+## 同期の仕組み(server.js / Store.Sync)
+- 端末内(localStorage / IndexedDB)が常に一次保存先。ページの Store / Files 呼び出しAPIは変更なし。
+- `Store.save/remove/saveSettings/importAll/clearAll` → localStorage 書き込み後、そのコレクションを 400ms デバウンスで `PUT /api/data/<col>`(settings は `PUT /api/data/settings`)。失敗時は `sales.sync.dirty` に記録し、次回接続時に再送。
+- `Files.put/update` → IndexedDB 書き込み後 `PUT /api/files/<id>`(本文=blob、`X-File-Meta` ヘッダにメタ情報)。`Files.remove` → `DELETE /api/files/<id>`(失敗時は `sales.sync.fileDeletes` に記録して再送)。
+- 取り込み(`Sync.now()`): `GET /api/status` で疎通確認 → 未送信分を push → `GET /api/data` でサーバー内容を localStorage に反映(未送信のコレクションは上書きしない)→ `GET /api/files` と IndexedDB を突き合わせ(サーバーにだけあれば取得、ローカルにだけあれば未送信なら送信・送信済みなら他端末で削除されたとみなして削除)→ 画面を再描画(モーダル編集中は再描画しない)。
+- 実行タイミング: 起動時、タブが可視に戻ったとき、`online` イベント、30秒ごと(再描画せずリスナー通知のみ)、設定画面の「今すぐ同期」。
+- サーバー側: `data/data.json`(exportAll と同じ形式 + updatedAt)、`data/files.json`(メタ情報)、`data/files/<id>`(本体)。書き込みは tmp → rename でアトミック。
+- サーバーが空(初回)でローカルにデータがあれば、ローカル全体を `PUT /api/data` で送って初期化する。
+- その端末からの初回接続(`sales.sync.lastAt` 未設定)で端末にもサーバーにもデータがある場合は、ID単位で合流(両方にあるIDは updatedAt の新しい方)してから `PUT /api/data` で送る。既存データを持つ2台目をつないでも消えない。
+- `file://` で開いた場合は同期を試みない(`Sync.state().mode === 'none'`)。python http.server 等では `/api/status` が応答しないためオフライン扱い。
+
+### API
+| メソッド | パス | 内容 |
+|---|---|---|
+| GET | /api/status | `{app:'sales-support', updatedAt, files}` 疎通確認 |
+| GET | /api/data | `{version, settings, data:{col:[...]}, updatedAt, empty}` |
+| PUT | /api/data | 全体を置き換え(本文は exportAll 形式) |
+| PUT | /api/data/:col | 1コレクション(配列)または settings(オブジェクト)を置き換え |
+| GET | /api/files | メタ情報の配列 |
+| GET/PUT/DELETE | /api/files/:id | 本体の取得/保存(本文=バイナリ、`X-File-Meta`=encodeURIComponent(JSON))/削除 |

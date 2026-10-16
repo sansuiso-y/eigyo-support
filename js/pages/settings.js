@@ -74,10 +74,52 @@ App.register('settings', {
       fileInp.value='';
     }});
 
+    /* ---- 同期状態(サーバーがある場合) ---- */
+    const syncBox = h('div',{class:'card'});
+    let offSync = null;
+    function drawSync(){
+      const st = Sync.state();
+      UI.clear(syncBox);
+      const last = st.lastSyncAt ? UI.fmtDateTime(st.lastSyncAt) : 'まだ同期していません';
+      let status, hint;
+      if (st.mode === 'none'){
+        status = h('span',{class:'badge other'}, '端末内のみ');
+        hint = 'index.html を直接開いているため、データはこのブラウザ内だけに保存されます。スマホとPCで同じデータを使うには、README の手順で「node server.js」を起動し、その画面(http://…)から開いてください。';
+      } else if (!st.checked){
+        status = h('span',{class:'badge planned'}, '確認中…');
+        hint = 'サーバーに接続できるか確認しています。';
+      } else if (st.online){
+        status = h('span',{class:'badge booked'}, '接続中');
+        hint = `保存のたびにサーバー(${st.serverUrl})へも書き込み、他の端末の変更は起動時・画面に戻ったとき・30秒ごとに取り込みます。同じ項目を両方で直した場合は、後に保存した方が残ります。`;
+      } else {
+        status = h('span',{class:'badge cancelled', style:{textDecoration:'none'}}, 'オフライン');
+        hint = 'サーバーに接続できません(端末内には保存されています)。Mac で「node server.js」が動いているか、同じWi-Fiにつながっているかを確認してください。つながると未送信の変更を自動で送ります。' + (st.lastError ? ` [${st.lastError}]` : '');
+      }
+      const syncBtn = h('button',{class:'btn primary', disabled: st.mode==='none' || st.syncing, onClick: async()=>{
+        const changed = await Sync.now({reload:true});
+        const s2 = Sync.state();
+        if (!s2.online) toast('サーバーに接続できませんでした', {error:true});
+        else toast(changed ? '他の端末の変更を取り込みました' : '同期しました(変更なし)');
+      }}, st.syncing ? '同期中…' : '🔄 今すぐ同期');
+      syncBox.append(
+        h('h2',null,'スマホ・PC間の同期'),
+        h('div',{class:'row', style:{alignItems:'center', gap:'10px', flexWrap:'wrap'}},
+          h('span',null,'状態: ', status),
+          h('span',{class:'small muted'}, '最終同期: ', last),
+          st.pending ? h('span',{class:'small muted'}, `未送信: ${st.pending}件`) : null
+        ),
+        h('p',{class:'small muted', style:{marginTop:'8px'}}, hint),
+        h('div',{class:'row mt'}, syncBtn)
+      );
+    }
+    drawSync();
+    offSync = Sync.on(drawSync);
+
     const counts = Store.COLS.map(c=>`${({customers:'顧客',events:'予定',routes:'ルート',hotels:'ホテル',cars:'レンタカー',reports:'日報',groups:'団体表'})[c]}: ${Store.list(c).length}`).join(' / ');
     root.append(
       h('div',{class:'page-head'}, h('h1',null,'⚙️ 設定')),
       h('div',{class:'card'}, h('h2',null,'基本設定'), form, h('div',{class:'row mt'}, saveBtn)),
+      syncBox,
       h('div',{class:'card'}, h('h2',null,'バックアップ'),
         h('p',{class:'small muted'},'データはこのブラウザ内に保存されています。別の端末で使う場合や念のための保存には、JSONを書き出して保管してください(添付ファイルは含まれません)。'),
         h('p',{class:'small muted'}, counts),
@@ -95,6 +137,7 @@ App.register('settings', {
           h('li',null,'名刺OCRは Tesseract.js を使用。精度には限りがあるため、読み取り後に必ず内容を確認してください。')
         ))
     );
+    return { destroy(){ offSync && offSync(); } };
   }
 });
 })();
