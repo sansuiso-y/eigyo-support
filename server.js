@@ -35,6 +35,7 @@ const MAX_BODY = 200 * 1024 * 1024; // 200MB(添付の上限)
 const COLS = ['customers','events','routes','hotels','cars','reports','groups'];
 const Auth = require('./auth');        // 名前+パスワード認証(AUTH_REQUIRED=1 のとき有効)
 const AUTH = Auth.enabled;
+const BUILD = Date.now().toString(36); // 起動(デプロイ)ごとに変わる版番号
 Auth.init(DATA_DIR);
 
 const MIME = {
@@ -200,6 +201,14 @@ function serveStatic(req, res, url){
   fs.stat(abs, (err, st)=>{
     if (err || !st.isFile()) return send(res, 404, 'not found');
     const type = MIME[path.extname(abs).toLowerCase()] || 'application/octet-stream';
+    if (p === '/index.html'){
+      // デプロイごとに変わる版番号を JS/CSS の URL に付け、古いファイルがブラウザに残らないようにする
+      let html; try { html = fs.readFileSync(abs, 'utf8'); } catch(e){ return send(res, 500, 'read error'); }
+      html = html.replace(/(src|href)="(js\/[^"]+\.js|css\/[^"]+\.css)"/g, (m, attr, file)=>`${attr}="${file}?v=${BUILD}"`);
+      const buf = Buffer.from(html);
+      res.writeHead(200, { 'Content-Type': type, 'Content-Length': buf.length, 'Cache-Control':'no-cache' });
+      return req.method === 'HEAD' ? res.end() : res.end(buf);
+    }
     res.writeHead(200, { 'Content-Type': type, 'Content-Length': st.size, 'Cache-Control':'no-cache' });
     if (req.method === 'HEAD') return res.end();
     fs.createReadStream(abs).pipe(res);

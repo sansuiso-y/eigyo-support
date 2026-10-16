@@ -238,12 +238,12 @@
         for (const r of visible){
           const cust = (r.customerId && Store.get('customers', r.customerId)) || findCustomer(r) || null;
           if (cust && !r.customerId) r.customerId = cust.id;
-          const catSel = h('select',{onChange:(e)=>{ r.category=e.target.value; saveDraft(); renderList(); }}, [['','(なし)'], ...CATS.map(c=>[c,c]), ...(r.category && !CATS.includes(r.category) ? [[r.category, r.category]] : [])].map(([v,l])=>h('option',{value:v, selected:v===r.category}, l)));
+          const catSel = h('select',{style:{minWidth:'130px', width:'130px'}, title:'区分', onChange:(e)=>{ r.category=e.target.value; saveDraft(); renderList(); }}, [['','(なし)'], ...CATS.map(c=>[c,c]), ...(r.category && !CATS.includes(r.category) ? [[r.category, r.category]] : [])].map(([v,l])=>h('option',{value:v, selected:v===r.category}, l)));
           tb.appendChild(h('tr',{class: r.checked?'':'muted'},
             h('td',null, h('input',{type:'checkbox', checked:r.checked, onChange:(e)=>{ r.checked=e.target.checked; saveDraft(); }})),
             h('td',{class:'nowrap'}, cust ? h('a',{class:'badge done', href:`#/customers?id=${cust.id}`, title:`名刺を開く: ${S.customerLabel(cust)}`}, '登録済') : h('span',{class:'badge planned', title:'名刺に未登録。「選択行を名刺に登録」で登録できます'}, '未登録')),
             cell(r,'company',{style:{minWidth:'140px'}}), cell(r,'name',{style:{minWidth:'100px'}}), cell(r,'title',{style:{minWidth:'80px'}}),
-            h('td',null, catSel),
+            h('td',{style:{minWidth:'140px'}}, catSel),
             cell(r,'phone',{style:{minWidth:'110px'}}),
             h('td',null, h('div',{class:'row', style:{flexWrap:'nowrap'}}, h('input',{type:'text', value:r.address||'', placeholder:'住所(ルート作成に必要)', style:{minWidth:'200px'}, onChange:(e)=>{ r.address=e.target.value; r.lat=null; r.lng=null; r.geoNote=''; saveDraft(); renderList(); }}),
               h('a',{class:'btn sm', href:`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent((r.company||'')+' '+(r.address||''))}`, target:'_blank', rel:'noopener', title:'地図で住所を調べる'}, '🔍'))),
