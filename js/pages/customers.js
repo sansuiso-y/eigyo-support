@@ -268,6 +268,32 @@
           return new File([blob], (file.name||'card').replace(/\.\w+$/,'')+'.jpg', {type:'image/jpeg'});
         } catch(e){ return file; }
       }
+      /* 写真の中の1枚の名刺を切り出す(box: [ymin,xmin,ymax,xmax] 0〜1000)。失敗したら null */
+      async function cropCard(file, box){
+        if (!box || box.length !== 4) return null;
+        try {
+          const bmp = await createImageBitmap(file);
+          const [y1,x1,y2,x2] = box.map(v=>v/1000);
+          if (!(x2 > x1 && y2 > y1)) return null;
+          const mx = (x2-x1)*0.03, my = (y2-y1)*0.03; // 少し余白
+          const sx = Math.max(0, (x1-mx))*bmp.width, sy = Math.max(0, (y1-my))*bmp.height;
+          const sw = Math.min(1, x2+mx)*bmp.width - sx, sh = Math.min(1, y2+my)*bmp.height - sy;
+          if (sw < 40 || sh < 40) return null;
+          const scale = Math.min(1, 1600/Math.max(sw, sh));
+          const cv = document.createElement('canvas'); cv.width = Math.round(sw*scale); cv.height = Math.round(sh*scale);
+          cv.getContext('2d').drawImage(bmp, sx, sy, sw, sh, 0, 0, cv.width, cv.height);
+          const blob = await new Promise(r=>cv.toBlob(r, 'image/jpeg', 0.9));
+          return blob ? new File([blob], '名刺.jpg', {type:'image/jpeg'}) : null;
+        } catch(e){ return null; }
+      }
+      function showCardPreview(it){
+        const src = it.cropUrl || it.url;
+        const img = h('img',{src, alt:'名刺', style:{maxWidth:'100%', maxHeight:'70vh', display:'block', margin:'0 auto', borderRadius:'8px', background:'#000'}});
+        let showingFull = !it.cropUrl;
+        const toggle = it.cropUrl ? h('button',{class:'btn', onClick:()=>{ showingFull = !showingFull; img.src = showingFull ? it.url : it.cropUrl; toggle.textContent = showingFull ? 'この名刺だけ表示' : '写真全体を表示'; }}, '写真全体を表示') : null;
+        UI.modal({ title: (it.card && (it.card.company || it.card.name)) || '名刺', wide:true, body: h('div',null, img, h('div',{class:'row mt'}, toggle, h('a',{class:'btn', href:src, target:'_blank', rel:'noopener'}, '別タブで開く'))), actions:[{label:'閉じる', onClick:()=>{}}] });
+      }
+      const boxArea = b => ((b[2]-b[0])/1000) * ((b[3]-b[1])/1000);
       function findDup(c){
         const n = x => String(x||'').replace(/\s+/g,'').toLowerCase();
         return Store.list('customers').find(x => (c.email && x.email && n(x.email)===n(c.email)) || (n(x.company)===n(c.company) && n(x.name)===n(c.name) && (c.company||c.name))) || null;
@@ -299,7 +325,7 @@
             list.appendChild(h('div',{class:'card compact', style:{marginBottom:'8px'}},
               h('div',{class:'row', style:{alignItems:'flex-start'}},
                 h('input',{type:'checkbox', checked: it.checked && it.status==='done', disabled: it.status!=='done', onChange:(e)=>{ it.checked=e.target.checked; }}),
-                h('img',{src:it.url, class:'thumb', style:{width:'120px', height:'76px', objectFit:'cover', cursor:'zoom-in'}, onClick:()=>window.open(it.url,'_blank')}),
+                h('img',{src:it.cropUrl || it.url, class:'thumb', style:{width:'140px', height:'90px', objectFit: it.cropUrl ? 'contain' : 'cover', cursor:'zoom-in', background:'#111'}, title:'クリックで拡大', onClick:()=>showCardPreview(it)}),
                 h('div',{style:{flex:1, minWidth:0}},
                   h('div',{class:'row'}, h('b',null, c.company || c.name || it.file.name), c.name && c.company ? h('span',{class:'muted'}, c.name) : null,
                     it.status==='pending' ? h('span',{class:'badge planned'}, '待機中') : it.status==='running' ? h('span',{class:'badge draft'}, 'AI読み取り中…') : it.status==='error' ? h('span',{class:'badge cancelled', style:{textDecoration:'none'}}, '失敗') : h('span',{class:'badge done'}, '読み取り済'),
@@ -340,8 +366,15 @@
                 const cs = j.cards || [];
                 if (!cs.length) throw new Error('名刺を認識できませんでした(写真を確認してください)');
                 it.card = cs[0]; it.note = j.note || ''; it.status = 'done'; it.dup = findDup(it.card);
-                // 1枚の写真に複数の名刺が写っていた場合は、同じ画像で項目を追加
-                cs.slice(1).forEach(c=>{ const extra = { key: UI.uid(), file: it.file, url: it.url, card: c, checked: true, dup: findDup(c), status:'done', error:'', note:'', shared:true }; items.splice(items.indexOf(it)+1, 0, extra); });
+                it.srcFile = f;
+                // 名刺ごとに写真から切り出す(位置が取れた場合)。複数枚写っていれば、同じ写真から項目を追加
+                const crop0 = cs.length > 1 || (cs[0].box && boxArea(cs[0].box) < 0.85) ? await cropCard(f, cs[0].box) : null;
+                if (crop0){ it.crop = crop0; it.cropUrl = URL.createObjectURL(crop0); }
+                for (const c of cs.slice(1)){
+                  const extra = { key: UI.uid(), file: it.file, srcFile: f, url: it.url, card: c, checked: true, dup: findDup(c), status:'done', error:'', note:'', shared:true };
+                  const cr = await cropCard(f, c.box); if (cr){ extra.crop = cr; extra.cropUrl = URL.createObjectURL(cr); }
+                  items.splice(items.indexOf(it)+1+cs.indexOf(c)-1, 0, extra);
+                }
               } catch(e){ it.status = 'error'; it.error = e.message; }
               render();
             }
@@ -363,7 +396,7 @@
               if (c.address && c.address !== (dup && dup.address)){ base.lat = null; base.lng = null; }
               const saved = Store.save('customers', base);
               try {
-                const f = await shrinkImage(it.file);
+                const f = it.crop || it.srcFile || await shrinkImage(it.file);
                 const rec = await Files.put(f, 'customer', saved.id, {name:'名刺.jpg'});
                 if (saved.cardImageId && saved.cardImageId !== rec.id){ try { await Files.remove(saved.cardImageId); } catch(e){} }
                 saved.cardImageId = rec.id; Store.save('customers', saved);
@@ -386,7 +419,7 @@
             h('p',{class:'small muted mt'}, '1枚の写真に1枚の名刺が基本ですが、机に並べて撮った写真(数枚まで)も読み取れます。読み取りはクラウド版のみ。登録後も顧客の編集画面で直せます。'),
             summary, h('div',{class:'mt'}, list)),
           actions:[ {label:'閉じる', onClick:()=>{}}, {label:'選択を登録', cls:'primary', onClick: async(e, close)=>{ const ok = await registerAll(close); return ok ? false : false; }} ],
-          onClose:()=>{ items.forEach(i=>{ if (!i.shared) URL.revokeObjectURL(i.url); }); refresh(); }
+          onClose:()=>{ items.forEach(i=>{ if (!i.shared) URL.revokeObjectURL(i.url); if (i.cropUrl) URL.revokeObjectURL(i.cropUrl); }); refresh(); }
         });
         render();
       }

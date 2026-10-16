@@ -81,7 +81,8 @@ async function extract(buffer, mime, fileName){
 
 const CARD_SCHEMA = { type:'OBJECT', properties:{ cards:{ type:'ARRAY', items:{ type:'OBJECT', properties:{
   company:{type:'STRING'}, department:{type:'STRING'}, name:{type:'STRING'}, nameKana:{type:'STRING'}, title:{type:'STRING'}, phone:{type:'STRING'}, mobile:{type:'STRING'}, fax:{type:'STRING'},
-  email:{type:'STRING'}, zip:{type:'STRING'}, address:{type:'STRING'}, website:{type:'STRING'}, memo:{type:'STRING'} } } }, note:{type:'STRING'} }, required:['cards'] };
+  email:{type:'STRING'}, zip:{type:'STRING'}, address:{type:'STRING'}, website:{type:'STRING'}, memo:{type:'STRING'},
+  box_2d:{ type:'ARRAY', items:{type:'INTEGER'}, description:'名刺の位置 [ymin, xmin, ymax, xmax](画像全体を0〜1000とした正規化座標)' } } } }, note:{type:'STRING'} }, required:['cards'] };
 
 /* 名刺画像 → 顧客の項目。1枚の写真に複数の名刺が写っていれば複数返す */
 async function cards(buffer, mime, fileName){
@@ -96,12 +97,14 @@ async function cards(buffer, mime, fileName){
 - company(会社名。「株式会社」などの法人格は名刺の表記どおり)、department(部署)、name(氏名。名刺の表記どおり。姓と名の間は半角スペース1つ)、nameKana(ふりがな/ローマ字があれば)、title(役職)、phone(代表/直通の固定電話)、mobile(携帯)、fax、email、zip(郵便番号 123-4567 形式)、address(住所。郵便番号は含めない。ビル名・階まで)、website、memo(名刺にあるその他の情報: 支店名・資格・SNS など短く)。
 - 読めない項目は空文字。推測で埋めない。裏面(英語面)しか無い場合は英語表記のまま入れる。
 - 電話番号は 03-1234-5678 / 090-1234-5678 のようにハイフン区切りに整える。
+- box_2d: その名刺が写っている範囲を [ymin, xmin, ymax, xmax] の4整数で返す(画像の上端=0・下端=1000、左端=0・右端=1000 の正規化座標)。名刺の四隅がぴったり収まる範囲。
 - note: 読み取りで気になった点(ピンぼけ・切れている など)を日本語で短く(なければ空)。`;
-  const parts = [ { inlineData:{ mimeType, data: buffer.toString('base64') } }, { text:'この写真の名刺を読み取って cards にしてください。' } ];
+  const parts = [ { inlineData:{ mimeType, data: buffer.toString('base64') } }, { text:'この写真の名刺を読み取って cards にしてください。各名刺の box_2d も必ず返してください。' } ];
   const out = await gemini({ parts, system, schema: CARD_SCHEMA });
   const list = (Array.isArray(out.cards) ? out.cards : []).map(c=>({
     company:str(c.company), department:str(c.department), name:str(c.name), nameKana:str(c.nameKana), title:str(c.title), phone:str(c.phone), mobile:str(c.mobile), fax:str(c.fax),
-    email:str(c.email), zip:str(c.zip), address:str(c.address), website:str(c.website), memo:str(c.memo)
+    email:str(c.email), zip:str(c.zip), address:str(c.address), website:str(c.website), memo:str(c.memo),
+    box: Array.isArray(c.box_2d) && c.box_2d.length === 4 && c.box_2d.every(n=>Number.isFinite(Number(n))) ? c.box_2d.map(n=>Math.max(0, Math.min(1000, Math.round(Number(n))))) : null
   })).filter(c=>c.company || c.name);
   return { cards: list, note: str(out.note) };
 }

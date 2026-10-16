@@ -12,10 +12,58 @@
   const norm = s => String(s||'').replace(/\s+/g,'').toLowerCase();
   function emptyRow(){ return { key: UI.uid(), checked:true, company:'', name:'', title:'', category:'', phone:'', address:'', memo:'', stayMin:null, lat:null, lng:null, customerId:null, date:'', timeFrom:'', timeTo:'' }; }
   function rowLabel(r){ return r.company || r.name || '(名称なし)'; }
+  /* 表記ゆれを吸収した正規化: 空白・括弧内(ローマ字併記など)・法人格(㈜ (주) 주식회사 株式会社 (株) 有限会社 Co.,Ltd.)を除く */
+  const loose = s => String(s||'').toLowerCase()
+    .replace(/[（(][^）)]*[）)]/g,'')
+    .replace(/㈜|\(주\)|주식회사|株式会社|有限会社|合同会社|\(株\)|\(有\)|co\.,?\s*ltd\.?|inc\.?|corp\.?|ltd\.?/g,'')
+    .replace(/[\s\u3000・.,、，\-–—_/]/g,'');
   function findCustomer(r){
     const cs = Store.list('customers');
-    return cs.find(c => c.company && norm(c.company)===norm(r.company) && (!r.name || !c.name || norm(c.name)===norm(r.name)))
-        || (r.name && cs.find(c => c.name && norm(c.name)===norm(r.name) && !r.company)) || null;
+    const rc = norm(r.company), rn = norm(r.name);
+    // 1) 厳密一致(会社名+氏名)
+    let hit = cs.find(c => c.company && norm(c.company)===rc && (!r.name || !c.name || norm(c.name)===rn));
+    if (hit) return hit;
+    const lc = loose(r.company), ln = loose(r.name);
+    // 2) 氏名が一致(ゆるい比較)し、会社名が一致/片方が空/どちらかを含む
+    if (ln) hit = cs.find(c => loose(c.name)===ln && (!lc || !loose(c.company) || loose(c.company)===lc || loose(c.company).includes(lc) || lc.includes(loose(c.company))));
+    if (hit) return hit;
+    // 3) 会社名が一致(ゆるい比較)し、どちらかの氏名が空
+    if (lc) hit = cs.find(c => loose(c.company)===lc && (!ln || !loose(c.name)));
+    return hit || null;
+  }
+  function linkFromCard(r, c){
+    r.customerId = c.id;
+    if (!r.company && c.company) r.company = c.company;
+    if (!r.name && c.name) r.name = c.name;
+    if (!r.title && c.title) r.title = c.title;
+    if (!r.phone && (c.phone || c.mobile)) r.phone = c.phone || c.mobile;
+    if (!r.address && c.address){ r.address = c.address; r.lat = c.lat ?? null; r.lng = c.lng ?? null; r.geoNote = ''; }
+    else if (r.address && c.address && norm(r.address)===norm(c.address) && c.lat != null){ r.lat = c.lat; r.lng = c.lng; }
+    if (!r.category && (c.tags||[])[0] && CATS.includes(c.tags[0])) r.category = c.tags[0];
+  }
+  function pickCustomer(r, onPicked){
+    const all = Store.list('customers').sort((a,b)=>(a.company||'').localeCompare(b.company||'','ja'));
+    const q = h('input',{type:'search', placeholder:'会社名・氏名で絞り込み', value: (r.company||r.name||'').slice(0,20)});
+    const list = h('div',{class:'list', style:{maxHeight:'50vh', overflow:'auto'}});
+    let m;
+    function draw(){
+      UI.clear(list);
+      const t = loose(q.value);
+      let rows = all.filter(c => !t || loose(c.company).includes(t) || loose(c.name).includes(t)).slice(0, 80);
+      const fallback = !rows.length && t && all.length;
+      if (fallback) rows = all.slice(0, 80); // 一致なし → 全件から選べるようにする
+      // 候補が少ないときは、表記ゆれを吸収した一致を上に
+      rows.sort((a,b)=> (loose(b.name)===loose(r.name)||loose(b.company)===loose(r.company)) - (loose(a.name)===loose(r.name)||loose(a.company)===loose(r.company)));
+      if (!rows.length){ list.appendChild(UI.empty('名刺がまだ登録されていません。「顧客・名刺」で名刺を取り込んでから紐付けてください。')); return; }
+      if (fallback) list.appendChild(h('div',{class:'small muted'}, `「${q.value}」に一致する名刺はありません。全件から選ぶか、検索語を変えてください。`));
+      for (const c of rows){
+        list.appendChild(h('div',{class:'item', onClick:()=>{ linkFromCard(r, c); m.close(); onPicked && onPicked(c); }},
+          h('div',{class:'main'}, h('div',{class:'title'}, S.customerLabel(c)), h('div',{class:'sub'}, [c.title, c.phone||c.mobile, c.address].filter(Boolean).join(' ・ ')))));
+      }
+    }
+    q.addEventListener('input', UI.debounce(draw, 150));
+    m = UI.modal({ title:`名刺を選んで紐付け: ${rowLabel(r)}${r.name?' / '+r.name:''}`, body: h('div',null, h('div',{class:'search mb'}, q), list), actions:[{label:'キャンセル', onClick:()=>{}}] });
+    draw();
   }
   function loadScript(src){ return new Promise((res,rej)=>{ const ex = document.querySelector(`script[src="${src}"]`); if (ex && ex.dataset.loaded) return res(); if (ex) ex.remove(); const s = h('script',{src, onLoad:()=>{ s.dataset.loaded='1'; res(); }, onError:()=>{ s.remove(); rej(new Error('読み込みに失敗: '+src)); }}); document.head.appendChild(s); }); }
 
@@ -225,6 +273,7 @@
           h('span',{class:'small muted'}, `選択 ${checkedCount} 件`),
           h('label',{class:'row small', style:{gap:'4px'}}, h('input',{type:'checkbox', checked:!!state.onlyNew, onChange:(e)=>{ state.onlyNew=e.target.checked; saveDraft(); renderList(); }}), '名刺に未登録の行だけ表示'),
           h('span',{style:{flex:1}}),
+          h('button',{class:'btn sm', title:'登録済みの名刺と自動で照合し直します(名刺を取り込んだ後に)', onClick:()=>{ let n=0; state.rows.forEach(r=>{ if (!(r.customerId && Store.get('customers', r.customerId))){ r.customerId=null; const c=findCustomer(r); if (c){ linkFromCard(r,c); n++; } } }); saveDraft(); renderList(); toast(n ? `${n}件を名刺と紐付けました` : '新たに一致する名刺はありませんでした'); }}, '🔗 名刺と照合'),
           h('button',{class:'btn sm', onClick:lookupAddresses, title:'住所が空の行について、会社名からAIがWeb検索で所在地を調べます(要確認)'}, '🌐 AIで住所を調べる'),
           h('button',{class:'btn sm', onClick:geocodeAll}, '📍 選択行の座標を取得'),
           h('button',{class:'btn sm', onClick:registerCustomers}, '👤 選択行を名刺に登録'),
@@ -237,11 +286,13 @@
         const cell = (r,k,attrs={}) => h('td',null, h('input',Object.assign({type:'text', value:r[k]||'', onChange:(e)=>{ r[k]=e.target.value; if (k==='address'){ r.lat=null; r.lng=null; } saveDraft(); } }, attrs)));
         for (const r of visible){
           const cust = (r.customerId && Store.get('customers', r.customerId)) || findCustomer(r) || null;
-          if (cust && !r.customerId) r.customerId = cust.id;
+          if (cust && !r.customerId){ linkFromCard(r, cust); saveDraft(); }
           const catSel = h('select',{style:{minWidth:'130px', width:'130px'}, title:'区分', onChange:(e)=>{ r.category=e.target.value; saveDraft(); renderList(); }}, [['','(なし)'], ...CATS.map(c=>[c,c]), ...(r.category && !CATS.includes(r.category) ? [[r.category, r.category]] : [])].map(([v,l])=>h('option',{value:v, selected:v===r.category}, l)));
           tb.appendChild(h('tr',{class: r.checked?'':'muted'},
             h('td',null, h('input',{type:'checkbox', checked:r.checked, onChange:(e)=>{ r.checked=e.target.checked; saveDraft(); }})),
-            h('td',{class:'nowrap'}, cust ? h('a',{class:'badge done', href:`#/customers?id=${cust.id}`, title:`名刺を開く: ${S.customerLabel(cust)}`}, '登録済') : h('span',{class:'badge planned', title:'名刺に未登録。「選択行を名刺に登録」で登録できます'}, '未登録')),
+            h('td',{class:'nowrap'}, cust
+              ? h('div',{class:'row', style:{gap:'4px', flexWrap:'nowrap'}}, h('a',{class:'badge done', href:`#/customers?id=${cust.id}`, title:`名刺を開く: ${S.customerLabel(cust)}`}, '登録済'), h('button',{class:'btn sm', title:'別の名刺に紐付け直す', style:{padding:'2px 6px'}, onClick:()=>pickCustomer(r, ()=>{ saveDraft(); renderList(); toast('紐付けを変更しました'); })}, '✎'))
+              : h('div',{class:'row', style:{gap:'4px', flexWrap:'nowrap'}}, h('span',{class:'badge planned', title:'名刺に未登録'}, '未登録'), h('button',{class:'btn sm', style:{padding:'2px 6px'}, title:'登録済みの名刺から選んで紐付ける', onClick:()=>pickCustomer(r, (c)=>{ saveDraft(); renderList(); toast(`「${S.customerLabel(c)}」と紐付けました`); })}, '名刺を選ぶ'))),
             cell(r,'company',{style:{minWidth:'140px'}}), cell(r,'name',{style:{minWidth:'100px'}}), cell(r,'title',{style:{minWidth:'80px'}}),
             h('td',{style:{minWidth:'140px'}}, catSel),
             cell(r,'phone',{style:{minWidth:'110px'}}),

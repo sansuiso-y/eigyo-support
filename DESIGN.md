@@ -99,7 +99,7 @@ attachments (IndexedDB 'files'): {id, name, type, size, blob, linkedKind, linked
 - `GET/PUT /api/data`, `PUT /api/data/<col>`, `/api/files/<id>` … 同期(server.js)
 - `POST /api/extract` … 画像/PDF(本文=ファイル、Content-Type で種類)→ {rows:[{company,name,title,category,phone,address,memo}], note}。パスポート番号・生年月日・部屋番号は読み取らない
 - `POST /api/assist` … {instruction, startDate, days, workStart, workEnd, rows:[{key,company,name,category,address,checked,date,timeFrom,timeTo}]} → {updates:[{key,date?,timeFrom?,timeTo?,checked?,stayMin?}], days?, startDate?, message}
-- `POST /api/cards` … 名刺画像(本文=ファイル)→ {cards:[{company,department,name,nameKana,title,phone,mobile,fax,email,zip,address,website,memo}], note}。1枚に複数の名刺が写っていれば複数返す
+- `POST /api/cards` … 名刺画像(本文=ファイル)→ {cards:[{company,department,name,nameKana,title,phone,mobile,fax,email,zip,address,website,memo}], note}。1枚に複数の名刺が写っていれば複数返す。各名刺の位置 box [ymin,xmin,ymax,xmax](0〜1000)も返し、クライアントが canvas で切り出す
 - `POST /api/lookup` … {area, rows:[{key,company,name,hint}]} → {results:[{key,address,confidence,source,note}]}(Gemini の Google 検索グラウンディング)
 - モデル: 環境変数 GEMINI_MODELS(既定 gemini-3.5-flash, 失敗時 gemini-2.5-flash)。キーは Secret Manager の GEMINI_API_KEY(社内共用)
 
