@@ -8,15 +8,15 @@
 }
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
-    --bg:#0f141b; --surface:#171e27; --surface-2:#1f2832; --border:#2a3440;
-    --text:#e6ebf2; --muted:#94a0b0; --primary:#4f8df5; --primary-ink:#0b1220;
-    --shadow:0 1px 3px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+    --bg:#0e1217; --surface:#1a2029; --surface-2:#242c38; --border:#3a4454;
+    --text:#eef2f7; --muted:#aab5c4; --primary:#5b9cff; --primary-ink:#0b1220;
+    --shadow:0 1px 3px rgba(0,0,0,.5),0 4px 14px rgba(0,0,0,.35);
   }
 }
 :root[data-theme="dark"]{
-  --bg:#0f141b; --surface:#171e27; --surface-2:#1f2832; --border:#2a3440;
-  --text:#e6ebf2; --muted:#94a0b0; --primary:#4f8df5; --primary-ink:#0b1220;
-  --shadow:0 1px 3px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+  --bg:#0e1217; --surface:#1a2029; --surface-2:#242c38; --border:#3a4454;
+  --text:#eef2f7; --muted:#aab5c4; --primary:#5b9cff; --primary-ink:#0b1220;
+  --shadow:0 1px 3px rgba(0,0,0,.5),0 4px 14px rgba(0,0,0,.35);
 }
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:var(--font);font-size:15px;line-height:1.5}
@@ -282,3 +282,35 @@ details.fold summary{cursor:pointer;color:var(--muted);font-size:.9rem;padding:6
 .plan-tbl td{padding:4px 6px}
 .plan-tbl tr.muted td input{opacity:.6}
 .stop .ctl select.sm{padding:4px 6px;min-height:30px;width:auto;font-size:.8rem}
+
+/* ---- ダークモードの可読性: カード内の入れ子要素は一段明るく、バッジは濃色向けに ---- */
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]) .card .stop, :root:not([data-theme="light"]) .card .file-row, :root:not([data-theme="light"]) .card .item,
+  :root:not([data-theme="light"]) .card .timeline .ev, :root:not([data-theme="light"]) .card .cal-cell, :root:not([data-theme="light"]) .card .stat,
+  :root:not([data-theme="light"]) .card input, :root:not([data-theme="light"]) .card select, :root:not([data-theme="light"]) .card textarea{background:var(--surface-2)}
+  :root:not([data-theme="light"]) .badge.visit{background:#1e3a8a;color:#bfdbfe}
+  :root:not([data-theme="light"]) .badge.meeting{background:#4c1d95;color:#ddd6fe}
+  :root:not([data-theme="light"]) .badge.move,:root:not([data-theme="light"]) .badge.searching,:root:not([data-theme="light"]) .badge.draft{background:#78350f;color:#fde68a}
+  :root:not([data-theme="light"]) .badge.done,:root:not([data-theme="light"]) .badge.booked,:root:not([data-theme="light"]) .badge.submitted{background:#14532d;color:#bbf7d0}
+  :root:not([data-theme="light"]) .badge.cancelled{background:#7f1d1d;color:#fecaca}
+  :root:not([data-theme="light"]) .cal-cell .ev{background:#1e3a8a;color:#bfdbfe}
+  :root:not([data-theme="light"]) .cal-cell .ev.meeting{background:#4c1d95;color:#ddd6fe}
+  :root:not([data-theme="light"]) .cal-cell .ev.move{background:#78350f;color:#fde68a}
+  :root:not([data-theme="light"]) .toast{background:#eef2f7;color:#0e1217}
+  :root:not([data-theme="light"]) .sheet{background:#fff;color:#000}
+}
+:root[data-theme="dark"] .card .stop, :root[data-theme="dark"] .card .file-row, :root[data-theme="dark"] .card .item, :root[data-theme="dark"] .card .timeline .ev,
+:root[data-theme="dark"] .card .cal-cell, :root[data-theme="dark"] .card .stat, :root[data-theme="dark"] .card input, :root[data-theme="dark"] .card select, :root[data-theme="dark"] .card textarea{background:var(--surface-2)}
+:root[data-theme="dark"] .badge.visit{background:#1e3a8a;color:#bfdbfe}
+:root[data-theme="dark"] .badge.meeting{background:#4c1d95;color:#ddd6fe}
+:root[data-theme="dark"] .badge.move,:root[data-theme="dark"] .badge.searching,:root[data-theme="dark"] .badge.draft{background:#78350f;color:#fde68a}
+:root[data-theme="dark"] .badge.done,:root[data-theme="dark"] .badge.booked,:root[data-theme="dark"] .badge.submitted{background:#14532d;color:#bbf7d0}
+:root[data-theme="dark"] .badge.cancelled{background:#7f1d1d;color:#fecaca}
+:root[data-theme="dark"] .cal-cell .ev{background:#1e3a8a;color:#bfdbfe}
+:root[data-theme="dark"] .cal-cell .ev.meeting{background:#4c1d95;color:#ddd6fe}
+:root[data-theme="dark"] .cal-cell .ev.move{background:#78350f;color:#fde68a}
+:root[data-theme="dark"] .toast{background:#eef2f7;color:#0e1217}
+:root[data-theme="dark"] .sheet{background:#fff;color:#000}
+/* 訪問先行のセレクトは内容幅に(未割当の行が縦に潰れないように) */
+.stop select, .stop .ctl select{width:auto;max-width:200px;flex-shrink:0}
+.stop .main > div:first-child{overflow-wrap:anywhere}

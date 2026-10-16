@@ -89,7 +89,15 @@
     // stops: 座標ありの行 {.., date?, timeFrom?, timeTo?, stayMin}。opt: {startDate, days, workStart, workEnd, roundTrip}
     const pts = [start, ...stops];
     const M = await Geo.matrix(pts);               // 分
+    const UNREACH = 1e5;                                   // OSRM が到達不能とした区間(1e6)の判定
+    const reachable = stops.map((_,i)=> M[0][i+1] < UNREACH);
+    if (!reachable.some(Boolean)){
+      const far = stops.reduce((a,s)=>Math.max(a, Geo.haversineKm(start, s)), 0);
+      const e = new Error(far > 300 ? `出発地から訪問先まで道路でたどり着けません(最も遠い訪問先まで約${Math.round(far)}km)。海外や遠方の出張では、出発地を「現地の宿泊ホテルや駅」に設定してください` : '出発地から訪問先への経路が見つかりません。出発地や住所の座標を確認してください');
+      e.code = 'unreachable'; throw e;
+    }
     const ws = toMin(opt.workStart) ?? 540, we = toMin(opt.workEnd) ?? 1080;
+    stops.forEach(s=>{ delete s.note; });
     const idx = new Map(stops.map((s,i)=>[s,i]));
     const travel = (a,b) => M[a?idx.get(a)+1:0][b?idx.get(b)+1:0];
     const dates = Array.from({length:opt.days},(_,d)=>UI.addDays(opt.startDate,d));
@@ -97,6 +105,7 @@
     const unassigned = [];
     let pool = [];
     for (const s of stops){
+      if (!reachable[idx.get(s)]){ s.note = '出発地から道路でたどり着けません(座標か出発地を確認)'; unassigned.push(s); continue; }
       if (s.date){ const d = days.find(x=>x.date===s.date); if (d) d.must.push(s); else { s.note = `希望日 ${s.date} が期間外`; unassigned.push(s); } }
       else pool.push(s);
     }
@@ -133,7 +142,7 @@
       }
       day.stops = order;
     }
-    pool.forEach(s=>{ if (s.timeFrom || s.timeTo) s.note = `時間帯 ${s.timeFrom||''}〜${s.timeTo||''} を守って入れられる日がありませんでした`; });
+    pool.forEach(s=>{ s.note = (s.timeFrom || s.timeTo) ? `時間帯 ${s.timeFrom||''}〜${s.timeTo||''} を守って入れられる日がありませんでした` : '日数内に入りませんでした(日数を増やすか、滞在時間・業務時間を調整)'; });
     unassigned.push(...pool);
     // 時刻指定のない日は2-optで並べ直し
     for (const day of days){
@@ -358,7 +367,7 @@
           saveDraft(); await computeAll(); renderPlan();
           toast(`${res.days.length}日分の計画を作成しました${res.unassigned.length?`(${res.unassigned.length}件は日数内に入りませんでした)`:''}${skipped?`(座標なし ${skipped}件は除外)`:''}`, {ms:5000});
           planEl.scrollIntoView({behavior:'smooth'});
-        } catch(e){ console.error(e); toast('計画の作成に失敗: '+e.message, {error:true}); }
+        } catch(e){ console.error(e); toast((e.code==='unreachable' ? '' : '計画の作成に失敗: ')+e.message, {error:true, ms:8000}); }
         finally { buildBtn.disabled=false; progress.textContent=''; }
       }}, '✨ 計画を自動作成');
 
@@ -406,8 +415,9 @@
         });
         if (p.unassigned.length){
           planEl.appendChild(h('div',{class:'card'}, h('h2',null,'未割当', h('span',{class:'small muted'}, ` ${p.unassigned.length}件(日数を増やすか、各日に移してください)`)),
-            h('div',{class:'stop-list'}, p.unassigned.map(s=>h('div',{class:'stop'}, h('span',{class:'num', style:{background:'var(--muted)'}}, '−'), h('div',{class:'main'}, s.label, h('div',{class:'sub'}, s.address||'')),
-              h('select',{onChange:(e)=>{ if(!e.target.value) return; p.unassigned = p.unassigned.filter(x=>x!==s); p.days.find(d=>d.date===e.target.value).stops.push(s); saveDraft(); computeAll().then(renderPlan); }}, [['','日を選ぶ…'], ...dayOptions].map(([v,l])=>h('option',{value:v},l))))))));
+            h('div',{class:'stop-list'}, p.unassigned.map(s=>h('div',{class:'stop'}, h('span',{class:'num', style:{background:'var(--muted)'}}, '−'),
+              h('div',{class:'main'}, h('div',null, s.label, s.name ? h('span',{class:'small muted'}, ` / ${s.name}`) : null), h('div',{class:'sub'}, s.address||'住所なし'), s.note ? h('div',{class:'small text-danger'}, '⚠ '+s.note) : null),
+              h('div',{class:'ctl'}, h('select',{class:'sm', title:'この日に入れる', onChange:(e)=>{ if(!e.target.value) return; p.unassigned = p.unassigned.filter(x=>x!==s); p.days.find(d=>d.date===e.target.value).stops.push(s); saveDraft(); computeAll().then(renderPlan); }}, [['','日を選ぶ…'], ...dayOptions].map(([v,l])=>h('option',{value:v},l)))))))));
         }
         planEl.appendChild(h('div',{class:'card'}, h('h2',null,'予定表に反映'),
           h('p',{class:'small muted'}, '各日の訪問を「スケジュール」に予定として登録し、日ごとのルートも保存します。訪問先が名刺に未登録なら登録します。'),
