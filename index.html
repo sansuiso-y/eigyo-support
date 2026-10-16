@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>営業サポート</title>
+<meta name="description" content="スケジュール・名刺・ルート・出張手配・日報・団体打ち合わせ表をまとめて管理する営業支援サイト">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" crossorigin="">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <button class="icon-btn" id="nav-toggle" aria-label="メニュー">☰</button>
+    <a class="brand" href="#/">営業サポート</a>
+    <div class="topbar-right" id="topbar-right"></div>
+  </header>
+  <nav class="sidenav" id="sidenav"></nav>
+  <main class="content" id="content"></main>
+  <nav class="tabbar" id="tabbar"></nav>
+</div>
+<div id="modal-root"></div>
+<div id="toast-root"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js" crossorigin=""></script>
+<script src="js/store.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/geo.js"></script>
+<script src="js/app.js"></script>
+<script src="js/pages/dashboard.js"></script>
+<script src="js/pages/schedule.js"></script>
+<script src="js/pages/customers.js"></script>
+<script src="js/pages/route.js"></script>
+<script src="js/pages/travel.js"></script>
+<script src="js/pages/reports.js"></script>
+<script src="js/pages/groups.js"></script>
+<script src="js/pages/files.js"></script>
+<script src="js/pages/settings.js"></script>
+<script>App.start();</script>
+</body>
+</html>
