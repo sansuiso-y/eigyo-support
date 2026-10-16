@@ -256,6 +256,141 @@
           ]});
       }
 
+      /* ---------- 名刺の一括取り込み(AI読み取り) ---------- */
+      async function shrinkImage(file){
+        if (!/^image\/(jpeg|png|webp)$/.test(file.type) || file.size < 1.2*1024*1024) return file;
+        try {
+          const bmp = await createImageBitmap(file);
+          const max = 2000, sc = Math.min(1, max/Math.max(bmp.width,bmp.height));
+          const cv = document.createElement('canvas'); cv.width = Math.round(bmp.width*sc); cv.height = Math.round(bmp.height*sc);
+          cv.getContext('2d').drawImage(bmp,0,0,cv.width,cv.height);
+          const blob = await new Promise(r=>cv.toBlob(r,'image/jpeg',0.88));
+          return new File([blob], (file.name||'card').replace(/\.\w+$/,'')+'.jpg', {type:'image/jpeg'});
+        } catch(e){ return file; }
+      }
+      function findDup(c){
+        const n = x => String(x||'').replace(/\s+/g,'').toLowerCase();
+        return Store.list('customers').find(x => (c.email && x.email && n(x.email)===n(c.email)) || (n(x.company)===n(c.company) && n(x.name)===n(c.name) && (c.company||c.name))) || null;
+      }
+      function openBulkImport(){
+        const items = []; // {key, file, url, card:{...}, checked, dup, status, error}
+        const list = h('div',{class:'list'});
+        const summary = h('div',{class:'small muted'});
+        const fileInp = h('input',{type:'file', accept:'image/*', multiple:true, style:{display:'none'}, onChange:()=>addFiles(fileInp.files)});
+        const camInp = h('input',{type:'file', accept:'image/*', capture:'environment', style:{display:'none'}, onChange:()=>addFiles(camInp.files)});
+        let running = false;
+        const FIELDS = [['company','会社名'],['department','部署'],['name','氏名'],['title','役職'],['phone','電話'],['mobile','携帯'],['email','メール'],['zip','郵便番号'],['address','住所'],['memo','メモ']];
+        function render(){
+          UI.clear(list);
+          const done = items.filter(i=>i.status==='done').length, errs = items.filter(i=>i.status==='error').length;
+          summary.textContent = items.length ? `${items.length}枚: 読み取り済 ${done} / 失敗 ${errs} / 処理中 ${items.length-done-errs}。内容を確認・修正して「選択を登録」を押してください。` : '';
+          if (!items.length){ list.appendChild(UI.empty('名刺の写真を選ぶと、AIが1枚ずつ読み取ってここに並びます。スマホでは「撮影」で続けて撮れます。')); return; }
+          for (const it of items){
+            const c = it.card || {};
+            const fields = h('div',{class:'form', style:{gap:'6px'}});
+            if (it.status==='done'){
+              const grid = h('div',{class:'f-row c3'});
+              FIELDS.forEach(([k,label])=>{ grid.appendChild(h('div',{class:'f'}, h('label',null,label), h('input',{type:'text', value:c[k]||'', onChange:(e)=>{ c[k]=e.target.value; it.dup = findDup(c); dupEl.replaceChildren(dupText(it)); }}))); });
+              fields.appendChild(grid);
+            }
+            const dupEl = h('div',{class:'small'});
+            function dupText(it){ return it.dup ? h('span',{class:'text-warn'}, `⚠ 同じ名刺が登録済み(${S.customerLabel(it.dup)})。登録すると上書き更新します`) : h('span',{class:'muted'}, '新規登録'); }
+            dupEl.appendChild(dupText(it));
+            list.appendChild(h('div',{class:'card compact', style:{marginBottom:'8px'}},
+              h('div',{class:'row', style:{alignItems:'flex-start'}},
+                h('input',{type:'checkbox', checked: it.checked && it.status==='done', disabled: it.status!=='done', onChange:(e)=>{ it.checked=e.target.checked; }}),
+                h('img',{src:it.url, class:'thumb', style:{width:'120px', height:'76px', objectFit:'cover', cursor:'zoom-in'}, onClick:()=>window.open(it.url,'_blank')}),
+                h('div',{style:{flex:1, minWidth:0}},
+                  h('div',{class:'row'}, h('b',null, c.company || c.name || it.file.name), c.name && c.company ? h('span',{class:'muted'}, c.name) : null,
+                    it.status==='pending' ? h('span',{class:'badge planned'}, '待機中') : it.status==='running' ? h('span',{class:'badge draft'}, 'AI読み取り中…') : it.status==='error' ? h('span',{class:'badge cancelled', style:{textDecoration:'none'}}, '失敗') : h('span',{class:'badge done'}, '読み取り済'),
+                    h('span',{style:{flex:1}}),
+                    it.status==='error' ? h('button',{class:'btn sm', onClick:()=>{ it.status='pending'; render(); runQueue(); }}, '再試行') : null,
+                    h('button',{class:'btn sm', onClick:()=>{ items.splice(items.indexOf(it),1); URL.revokeObjectURL(it.url); render(); }}, '✕')),
+                  it.error ? h('div',{class:'small text-danger'}, it.error) : null,
+                  it.note ? h('div',{class:'small muted'}, 'AIメモ: '+it.note) : null,
+                  it.status==='done' ? dupEl : null)),
+              fields));
+          }
+        }
+        async function addFiles(files){
+          for (const f of Array.from(files||[])){
+            if (!f.type.startsWith('image/') && !/\.(heic|heif)$/i.test(f.name)) { toast(`${f.name}: 画像ではありません`, {error:true}); continue; }
+            items.push({ key: UI.uid(), file: f, url: URL.createObjectURL(f), card: null, checked: true, dup: null, status: 'pending', error: '' });
+          }
+          fileInp.value=''; camInp.value='';
+          render(); runQueue();
+        }
+        async function runQueue(){
+          if (running) return; running = true;
+          try {
+            for (const it of items){
+              if (it.status !== 'pending') continue;
+              it.status = 'running'; render();
+              try {
+                const f = await shrinkImage(it.file);
+                const read = async()=>{
+                  const res = await fetch('api/cards', { method:'POST', headers:{ 'Content-Type': f.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(f.name||'') }, body: f });
+                  let j=null; try { j = await res.json(); } catch(e){}
+                  if (!res.ok) throw new Error((j&&j.error) || `読み取りに失敗 (${res.status})`);
+                  return j;
+                };
+                let j = await read();
+                // 氏名も電話もメールも取れていない場合は一度だけ読み直す(AIの揺れ対策)
+                if (!(j.cards||[]).length || !((j.cards[0].name) || (j.cards[0].phone) || (j.cards[0].email))) { try { const j2 = await read(); if ((j2.cards||[]).length) j = j2; } catch(e){} }
+                const cs = j.cards || [];
+                if (!cs.length) throw new Error('名刺を認識できませんでした(写真を確認してください)');
+                it.card = cs[0]; it.note = j.note || ''; it.status = 'done'; it.dup = findDup(it.card);
+                // 1枚の写真に複数の名刺が写っていた場合は、同じ画像で項目を追加
+                cs.slice(1).forEach(c=>{ const extra = { key: UI.uid(), file: it.file, url: it.url, card: c, checked: true, dup: findDup(c), status:'done', error:'', note:'', shared:true }; items.splice(items.indexOf(it)+1, 0, extra); });
+              } catch(e){ it.status = 'error'; it.error = e.message; }
+              render();
+            }
+          } finally { running = false; }
+        }
+        async function registerAll(close){
+          const targets = items.filter(i=>i.checked && i.status==='done');
+          if (!targets.length){ toast('登録する名刺を選択してください', {error:true}); return false; }
+          let created=0, updated=0, failed=0;
+          const toGeocode = [];
+          for (const it of targets){
+            try {
+              const c = it.card;
+              const dup = findDup(c);
+              const base = dup ? Object.assign({}, dup) : { tags:[], memo:'', lat:null, lng:null, cardImageId:null };
+              FIELDS.forEach(([k])=>{ if (c[k]) base[k] = c[k]; });
+              const extras = [c.nameKana && `ふりがな: ${c.nameKana}`, c.fax && `FAX: ${c.fax}`, c.website && `Web: ${c.website}`].filter(Boolean).join(' / ');
+              if (extras && !(base.memo||'').includes(extras)) base.memo = [base.memo, extras].filter(Boolean).join('\n');
+              if (c.address && c.address !== (dup && dup.address)){ base.lat = null; base.lng = null; }
+              const saved = Store.save('customers', base);
+              try {
+                const f = await shrinkImage(it.file);
+                const rec = await Files.put(f, 'customer', saved.id, {name:'名刺.jpg'});
+                if (saved.cardImageId && saved.cardImageId !== rec.id){ try { await Files.remove(saved.cardImageId); } catch(e){} }
+                saved.cardImageId = rec.id; Store.save('customers', saved);
+              } catch(e){ console.warn('card image save failed', e); }
+              if (saved.address && (saved.lat == null || saved.lng == null)) toGeocode.push(saved.id);
+              dup ? updated++ : created++;
+            } catch(e){ console.error(e); failed++; }
+          }
+          toast(`名刺を登録: 新規 ${created} / 更新 ${updated}${failed?` / 失敗 ${failed}`:''}`, {ms:5000});
+          close();
+          if (toGeocode.length){
+            // 住所の座標取得は裏で順に行う(1件1秒ほど)
+            (async()=>{ let n=0; for (const id of toGeocode){ const c = Store.get('customers', id); if (!c || !c.address) continue; try { const g = await Geo.geocode(c.address); if (g){ c.lat=g.lat; c.lng=g.lng; Store.save('customers', c); n++; } } catch(e){} } if (n) toast(`${n}件の住所の座標を取得しました`); })();
+          }
+          return true;
+        }
+        const m = UI.modal({ title:'名刺をまとめて取り込む', wide:true,
+          body: h('div',null,
+            h('div',{class:'row'}, h('button',{class:'btn', onClick:()=>camInp.click()}, '📷 撮影して追加'), h('button',{class:'btn', onClick:()=>fileInp.click()}, '🖼️ 写真を選ぶ(複数可)'), fileInp, camInp),
+            h('p',{class:'small muted mt'}, '1枚の写真に1枚の名刺が基本ですが、机に並べて撮った写真(数枚まで)も読み取れます。読み取りはクラウド版のみ。登録後も顧客の編集画面で直せます。'),
+            summary, h('div',{class:'mt'}, list)),
+          actions:[ {label:'閉じる', onClick:()=>{}}, {label:'選択を登録', cls:'primary', onClick: async(e, close)=>{ const ok = await registerAll(close); return ok ? false : false; }} ],
+          onClose:()=>{ items.forEach(i=>{ if (!i.shared) URL.revokeObjectURL(i.url); }); refresh(); }
+        });
+        render();
+      }
+
       /* ---------- 編集 / 新規 ---------- */
       function openEdit(c, {onSaved}={}){
         const isNew = !c || !c.id;
@@ -399,6 +534,7 @@
       search.addEventListener('input', UI.debounce(refresh, 200));
       root.append(
         h('div',{class:'page-head'}, h('h1',null,'👤 顧客・名刺'), h('div',{class:'spacer'}),
+          h('button',{class:'btn', onClick:openBulkImport}, '📇 名刺をまとめて取り込む'),
           h('a',{class:'btn', href:'#/plan'}, '🧭 リストから取り込む'),
           h('button',{class:'btn', onClick:exportCsv}, '⬇️ CSV書き出し'),
           h('button',{class:'btn primary', onClick:()=>openEdit(null, {onSaved:(s)=>openDetail(s.id)})}, '＋ 新規')),

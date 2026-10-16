@@ -3,6 +3,7 @@
  *   POST /api/extract  … 写真・PDF の訪問先リストを表(JSON)に読み取る
  *   POST /api/assist   … 「どこをいつ回りたいか」の日本語の注文を、行ごとの希望日・時間帯に変換する
  *   POST /api/lookup   … 会社名から所在地を Google 検索付きで調べる(要確認として扱う)
+ *   POST /api/cards    … 名刺の写真(1枚に複数枚写っていてもよい)を読み取り、顧客の項目にする
  * 環境変数 GEMINI_API_KEY が必要(他の社内アプリと共用)。未設定なら 503 を返す。
  */
 'use strict';
@@ -77,6 +78,34 @@ async function extract(buffer, mime, fileName){
   return { rows, note: str(out.note) };
 }
 
+
+const CARD_SCHEMA = { type:'OBJECT', properties:{ cards:{ type:'ARRAY', items:{ type:'OBJECT', properties:{
+  company:{type:'STRING'}, department:{type:'STRING'}, name:{type:'STRING'}, nameKana:{type:'STRING'}, title:{type:'STRING'}, phone:{type:'STRING'}, mobile:{type:'STRING'}, fax:{type:'STRING'},
+  email:{type:'STRING'}, zip:{type:'STRING'}, address:{type:'STRING'}, website:{type:'STRING'}, memo:{type:'STRING'} } } }, note:{type:'STRING'} }, required:['cards'] };
+
+/* 名刺画像 → 顧客の項目。1枚の写真に複数の名刺が写っていれば複数返す */
+async function cards(buffer, mime, fileName){
+  if (!buffer || !buffer.length){ const e = new Error('ファイルが空です'); e.status=400; throw e; }
+  if (buffer.length > MAX_FILE){ const e = new Error('ファイルが大きすぎます(25MBまで)'); e.status=413; throw e; }
+  let mimeType = (mime||'').split(';')[0].trim().toLowerCase();
+  const ext = (fileName||'').split('.').pop().toLowerCase();
+  if (!mimeType || mimeType==='application/octet-stream'){ mimeType = ({jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',webp:'image/webp',heic:'image/heic',heif:'image/heif',pdf:'application/pdf',gif:'image/gif'})[ext] || 'image/jpeg'; }
+  const system = `あなたは営業アシスタントです。名刺の写真を読み取り、顧客台帳の項目としてJSONにします。
+ルール:
+- 写真に写っている名刺1枚につき cards の1要素。複数枚写っていれば複数。名刺が写っていなければ cards は空。
+- company(会社名。「株式会社」などの法人格は名刺の表記どおり)、department(部署)、name(氏名。名刺の表記どおり。姓と名の間は半角スペース1つ)、nameKana(ふりがな/ローマ字があれば)、title(役職)、phone(代表/直通の固定電話)、mobile(携帯)、fax、email、zip(郵便番号 123-4567 形式)、address(住所。郵便番号は含めない。ビル名・階まで)、website、memo(名刺にあるその他の情報: 支店名・資格・SNS など短く)。
+- 読めない項目は空文字。推測で埋めない。裏面(英語面)しか無い場合は英語表記のまま入れる。
+- 電話番号は 03-1234-5678 / 090-1234-5678 のようにハイフン区切りに整える。
+- note: 読み取りで気になった点(ピンぼけ・切れている など)を日本語で短く(なければ空)。`;
+  const parts = [ { inlineData:{ mimeType, data: buffer.toString('base64') } }, { text:'この写真の名刺を読み取って cards にしてください。' } ];
+  const out = await gemini({ parts, system, schema: CARD_SCHEMA });
+  const list = (Array.isArray(out.cards) ? out.cards : []).map(c=>({
+    company:str(c.company), department:str(c.department), name:str(c.name), nameKana:str(c.nameKana), title:str(c.title), phone:str(c.phone), mobile:str(c.mobile), fax:str(c.fax),
+    email:str(c.email), zip:str(c.zip), address:str(c.address), website:str(c.website), memo:str(c.memo)
+  })).filter(c=>c.company || c.name);
+  return { cards: list, note: str(out.note) };
+}
+
 const ASSIST_SCHEMA = { type:'OBJECT', properties:{
   updates:{ type:'ARRAY', items:{ type:'OBJECT', properties:{ key:{type:'STRING'}, date:{type:'STRING'}, timeFrom:{type:'STRING'}, timeTo:{type:'STRING'}, checked:{type:'BOOLEAN'}, stayMin:{type:'INTEGER'}, reason:{type:'STRING'} }, required:['key'] } },
   days:{type:'INTEGER'}, startDate:{type:'STRING'}, message:{type:'STRING'} }, required:['updates','message'] };
@@ -133,16 +162,16 @@ function hhmm(v){ const m = /^(\d{1,2}):(\d{2})/.exec(String(v||'')); if (!m) re
 /* server.js から呼ぶ: 処理できたら true、対象外なら false */
 async function handle(req, res, url, { readBody, send }){
   const parts = url.pathname.split('/').filter(Boolean);
-  if (parts[0] !== 'api' || !['extract','assist','lookup'].includes(parts[1])) return false;
+  if (parts[0] !== 'api' || !['extract','assist','lookup','cards'].includes(parts[1])) return false;
   if (req.method !== 'POST'){ send(res, 405, { error:'method not allowed' }); return true; }
-  const limit = parts[1] === 'extract' ? MAX_FILE : 2*1024*1024;
+  const limit = (parts[1] === 'extract' || parts[1] === 'cards') ? MAX_FILE : 2*1024*1024;
   const declared = Number(req.headers['content-length'] || 0);
   if (declared > limit){ send(res, 413, { error: parts[1]==='extract' ? 'ファイルが大きすぎます(25MBまで)' : '送信データが大きすぎます' }); req.resume(); return true; }
   try {
-    if (parts[1] === 'extract'){
+    if (parts[1] === 'extract' || parts[1] === 'cards'){
       const buf = await readBody(req, MAX_FILE);
       let fname = ''; try { fname = decodeURIComponent(req.headers['x-file-name'] || ''); } catch(e){ fname = ''; }
-      const out = await extract(buf, req.headers['content-type'], fname);
+      const out = parts[1] === 'extract' ? await extract(buf, req.headers['content-type'], fname) : await cards(buf, req.headers['content-type'], fname);
       send(res, 200, out);
     } else {
       let json; try { json = JSON.parse((await readBody(req, 2*1024*1024)).toString('utf8')); } catch(e){ send(res, 400, { error:'invalid json' }); return true; }
@@ -151,4 +180,4 @@ async function handle(req, res, url, { readBody, send }){
   } catch(e){ console.error('[ai]', e.message); send(res, e.status || 500, { error: e.message || 'AI処理に失敗しました' }); }
   return true;
 }
-module.exports = { handle, extract, assist, lookup };
+module.exports = { handle, extract, assist, lookup, cards };
