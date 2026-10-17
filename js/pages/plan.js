@@ -269,9 +269,12 @@
   const MODES = [
     ['car','🚗','車', null], ['taxi','🚕','タクシー', null],
     ['shinkansen','🚄','新幹線', { detour:1.15, kmh:200, overhead:30 }], ['ktx','🚄','KTX', { detour:1.15, kmh:160, overhead:30 }],
-    ['train','🚃','電車', { detour:1.25, kmh:45, overhead:15 }], ['bus','🚌','バス', { detour:1.3, kmh:35, overhead:10 }], ['walk','🚶','徒歩', { detour:1.25, kmh:4.5, overhead:0 }]
+    ['train','🚃','電車', { detour:1.25, kmh:45, overhead:15 }], ['bus','🚌','バス', { detour:1.3, kmh:60, overhead:15 }], ['walk','🚶','徒歩', { detour:1.25, kmh:4.5, overhead:0 }]
   ];
-  const modeOf = k => MODES.find(m=>m[0]===k) || MODES[0];
+  const SEG_MODES = [...MODES, ['flight','✈️','飛行機', { detour:1.0, kmh:700, overhead:120 }], ['ship','⛴','船', { detour:1.2, kmh:30, overhead:30 }]];   // 経路の区間だけで選べる手段(飛行機は搭乗手続き・出入国込み)
+  const modeOf = k => SEG_MODES.find(m=>m[0]===k) || MODES[0];
+  const AIRPORT_RE = /空港|공항|airport|羽田|成田|関空|仁川|金浦/i;
+  const splitRoute = memo => String(memo||'').split(/\s*(?:→|->)\s*/).map(x=>x.trim()).filter(Boolean);
   const isRoadMode = k => !modeOf(k)[3];
   function estimateRoute(pts, k){
     const sp = modeOf(k)[3]; const legs = []; let km = 0, min = 0;
@@ -577,11 +580,13 @@
         for (let i = 0; i < state.plan.days.length; i++){
           const day = state.plan.days[i]; const s = resolveStart(dates, i);
           if (!s){ toast(`${i+1}日目の出発地が決まりません。「2. 計画の条件」の出発地か、その日の出発地を設定してください`, {error:true}); delete state.plan.itins[day.date]; continue; }
-          state.plan.itins[day.date] = await itinerary(s, resolveEnd(dates, i), day, state);
+          const e = resolveEnd(dates, i);
+          state.plan.itins[day.date] = await itinerary(s, e, day, state);
+          const segs = await computeSegments(day.date, s, e); if (segs) state.plan.itins[day.date].segments = segs;
         }
         saveDraft();
       }
-      async function recompute(day){ const dates = state.plan.days.map(d=>d.date); const i = dates.indexOf(day.date); const s = resolveStart(dates, i); if (!s){ toast('その日の出発地が決まりません', {error:true}); return; } state.plan.itins[day.date] = await itinerary(s, resolveEnd(dates, i), day, state); saveDraft(); renderPlan(); }
+      async function recompute(day){ const dates = state.plan.days.map(d=>d.date); const i = dates.indexOf(day.date); const s = resolveStart(dates, i); if (!s){ toast('その日の出発地が決まりません', {error:true}); return; } const e = resolveEnd(dates, i); state.plan.itins[day.date] = await itinerary(s, e, day, state); const segs = await computeSegments(day.date, s, e); if (segs) state.plan.itins[day.date].segments = segs; saveDraft(); renderPlan(); }
       /* おすすめの宿(AI + Google 検索)。各日の最終訪問先・翌日の最初の訪問先の近くで探し、「帰着地にする」で設定 */
       async function suggestHotels(){
         const p = state.plan; if (!p){ toast('先に「計画を自動作成」してください', {error:true}); return; }
@@ -622,14 +627,94 @@
           j.note ? h('p',{class:'small muted'}, j.note) : null);
         m = UI.modal({ title:'おすすめの宿', wide:true, body, actions:[{label:'閉じる', onClick:()=>{}}] });
       }
-      /* その日の経路・メモ(「山水荘→羽田→仁川空港→청주역」や便名など)を手で書き換える */
+      /* 経路(「山水荘→羽田→仁川空港→청주역」)の区間ごとの手段と所要時間。手段は dayPlaces[date].segModes[i] */
+      const SEG_Q = [[/羽田/, '東京国際空港'], [/成田/, '成田国際空港'], [/関空|関西空港/, '関西国際空港'], [/中部|セントレア/, '中部国際空港'], [/仁川/, '인천국제공항'], [/金浦/, '김포국제공항'], [/金海|釜山空港/, '김해국제공항'], [/清州空港/, '청주국제공항']];
+      function segModeOf(date, i, a, b, ds, de){
+        const dp = state.dayPlaces[date] || {}; const m = dp.segModes && dp.segModes[i]; if (m) return m;
+        if (ds && de && a === ds.label && b === de.label) return dp.mode || 'car';   // 現地での区間はその日の手段
+        if (AIRPORT_RE.test(a) && AIRPORT_RE.test(b)) return 'flight';
+        return 'car';
+      }
+      async function segPoint(name, ds, de){
+        if (ds && name === ds.label) return ds; if (de && name === de.label) return de;
+        const S0 = Store.settings(), co = S0.company || '';
+        if (co && isNum(S0.homeLat) && isNum(S0.homeLng) && (co.includes(name) || name.includes(co))) return { lat:Number(S0.homeLat), lng:Number(S0.homeLng) };   // 自社(山水荘)は設定の拠点
+        for (const v of Object.values(state.dayPlaces)) for (const k of ['start','end']) if (v && v[k] && v[k].label === name && isNum(v[k].lat)) return v[k];
+        let q = name; for (const [re, v] of SEG_Q) if (re.test(name)){ q = v; break; }
+        try { const g = await Geo.geocode(q); if (g) return g; } catch(e){}
+        return null;
+      }
+      async function computeSegments(date, ds, de){
+        const memo = (state.dayPlaces[date] || {}).memo || ''; if (!/→|->/.test(memo)) return null;
+        const pts = splitRoute(memo); if (pts.length < 2) return null;
+        const segs = [];
+        for (let i = 0; i < pts.length - 1; i++){
+          const a = pts[i], b = pts[i+1], mode = segModeOf(date, i, a, b, ds, de);
+          const pa = await segPoint(a, ds, de), pb = await segPoint(b, ds, de);
+          let min = null, km = null;
+          if (pa && pb){
+            if (isRoadMode(mode)){ const rr = await Geo.route([pa, pb]); min = rr.durationMin; km = rr.distanceKm; }
+            else { const L = estimateRoute([pa, pb], mode).legs[0]; min = L.durationMin; km = L.distanceKm; }
+          }
+          segs.push({ from:a, to:b, mode, min, km, estimated: !isRoadMode(mode) });
+        }
+        return segs;
+      }
+      async function setSegMode(day, i, mode, isLocal){
+        const o = Object.assign({}, state.dayPlaces[day.date] || {}); o.segModes = Object.assign({}, o.segModes || {}); o.segModes[i] = mode;
+        if (isLocal){ if (mode === 'car') delete o.mode; else if (MODES.some(m=>m[0]===mode)) o.mode = mode; }   // 現地での区間の手段は、その日の移動計算にも使う
+        state.dayPlaces[day.date] = o; saveDraft(); await recompute(day);
+      }
+      /* 行程エディタ: 場所を行く順に並べ、間の移動手段を選ぶ(時間は入れない。所要時間の目安は自動計算)。
+         保存先: dayPlaces[date].memo = 「A→B→C」、segModes = {区間番号: 手段}、note = メモ(便名など) */
       async function editMemo(date, di){
-        const cur = (state.dayPlaces[date] || {}).memo || '';
-        const v = await UI.prompt(`${di+1}日目 ${UI.fmtDate(date)} の経路・メモ`, { label:'「→」で区切ると経路として表示します(例: 山水荘→羽田→仁川空港→청주역 / KE2102 9:40発)。空にすると消えます', value: cur, placeholder:'山水荘→羽田→仁川空港→청주역' });
-        if (v === null) return;
-        const o = Object.assign({}, state.dayPlaces[date] || {}); const t = String(v).trim(); if (t) o.memo = t; else delete o.memo;
-        if (Object.keys(o).length) state.dayPlaces[date] = o; else delete state.dayPlaces[date];
-        saveDraft(); renderPlan();
+        const dp0 = state.dayPlaces[date] || {};
+        const dates = planDates(); const ix = dates.indexOf(date);
+        const ds = ix >= 0 ? resolveStart(dates, ix) : null, de = ix >= 0 ? resolveEnd(dates, ix) : null;
+        const hasRoute = /→|->/.test(dp0.memo || '');
+        let pts = hasRoute ? splitRoute(dp0.memo) : [];
+        if (pts.length < 2) pts = [ds ? ds.label : '', de && !(ds && samePt(ds, de)) ? de.label : ''];   // 初期値: その日の出発地 → 帰着地
+        let modes = pts.slice(0, -1).map((a, k)=>segModeOf(date, k, a, pts[k+1], ds, de));
+        const note = h('input',{type:'text', value: dp0.note || (hasRoute ? '' : (dp0.memo || '')), placeholder:'便名・集合場所など(任意)'});
+        const listEl = h('div');
+        function draw(){
+          UI.clear(listEl);
+          pts.forEach((p, k)=>{
+            listEl.appendChild(h('div',{class:'row', style:{gap:'6px', alignItems:'center', flexWrap:'nowrap', marginBottom:'4px'}},
+              h('span',{class:'num', style:{flexShrink:0}}, k+1),
+              h('input',{type:'text', value:p, placeholder: k === 0 ? '出発する場所(例: 山水荘)' : '次の場所(例: 羽田空港)', style:{flex:1, minWidth:0}, onInput:(e)=>{ pts[k] = e.target.value; }}),
+              h('button',{class:'btn sm', disabled:k===0, title:'上へ', onClick:()=>{ [pts[k-1], pts[k]] = [pts[k], pts[k-1]]; draw(); }}, '↑'),
+              h('button',{class:'btn sm', disabled:k===pts.length-1, title:'下へ', onClick:()=>{ [pts[k+1], pts[k]] = [pts[k], pts[k+1]]; draw(); }}, '↓'),
+              h('button',{class:'btn sm danger', disabled:pts.length<=2, title:'この場所を消す', onClick:()=>{ const mi = k === pts.length-1 ? k-1 : k; pts.splice(k, 1); modes.splice(mi, 1); draw(); }}, '✕')));
+            if (k < pts.length - 1) listEl.appendChild(h('div',{class:'row small', style:{gap:'6px', alignItems:'center', margin:'0 0 6px 34px'}},
+              h('span',{class:'muted'}, '↓'),
+              h('select',{class:'sm', style:{width:'auto', minHeight:'28px', padding:'2px 6px'}, onChange:(e)=>{ modes[k] = e.target.value; }}, SEG_MODES.map(([mk, ic, lb])=>h('option',{value:mk, selected:(modes[k] || 'car') === mk}, `${ic} ${lb}`)))));
+          });
+        }
+        draw();
+        async function save(clear){
+          const o = Object.assign({}, state.dayPlaces[date] || {});
+          if (clear){ delete o.memo; delete o.segModes; delete o.note; }
+          else {
+            const idx = pts.map((x, k)=>String(x||'').trim() ? k : -1).filter(k=>k >= 0);   // 空欄は飛ばす
+            const kept = idx.map(k=>pts[k].trim());
+            if (kept.length >= 2){
+              o.memo = kept.join('→'); o.segModes = {};
+              for (let k = 0; k < idx.length - 1; k++) o.segModes[k] = modes[idx[k+1] - 1] || 'car';   // 次の場所の直前の区間の手段
+              for (let k = 0; k < kept.length - 1; k++) if (ds && de && kept[k] === ds.label && kept[k+1] === de.label && MODES.some(m=>m[0]===o.segModes[k])){ if (o.segModes[k] === 'car') delete o.mode; else o.mode = o.segModes[k]; }   // 現地での区間はその日の移動計算にも
+            } else { delete o.memo; delete o.segModes; }
+            const nt = note.value.trim(); if (nt) o.note = nt; else delete o.note;
+          }
+          if (Object.keys(o).length) state.dayPlaces[date] = o; else delete state.dayPlaces[date];
+          saveDraft(); const day = state.plan && state.plan.days.find(d=>d.date===date); if (day) await recompute(day); else renderPlan();
+        }
+        UI.modal({ title:`${di+1}日目 ${UI.fmtDate(date)} の行程`,
+          body: h('div',{class:'form'},
+            h('p',{class:'small muted'}, '行く順に場所を並べ、間の移動手段を選んでください。時間は入れなくて大丈夫です(所要時間の目安は自動で出します)。'),
+            listEl,
+            h('div',{class:'row'}, h('button',{class:'btn sm', onClick:()=>{ pts.push(''); modes.push('car'); draw(); setTimeout(()=>{ const ins = listEl.querySelectorAll('input'); ins[ins.length-1]?.focus(); }, 0); }}, '＋ 場所を追加')),
+            h('div',{class:'f mt'}, h('label',null,'メモ'), note)),
+          actions:[ {label:'キャンセル', onClick:()=>{}}, ...(dp0.memo || dp0.note ? [{label:'行程を消す', onClick:()=>{ save(true); }}] : []), {label:'保存', cls:'primary', onClick:()=>{ save(false); }} ] });
       }
       /* 日ごとの出発地・帰着地の変更 */
       async function editPlace(date, kind, di){
@@ -741,15 +826,25 @@
                 MODES.map(([k, ic, lb])=>h('option',{value:k, selected: (dp.mode || 'car') === k}, `${ic} ${lb}`)))));
           planEl.appendChild(h('div',{class:'card'},
             h('h2',null, `${di+1}日目 ${UI.fmtDate(day.date)}`, h('span',{class:'small muted'}, dp.travelOnly ? ' 移動日' : ` ${day.stops.length}件`),
-              it && !(it.travel && it.travel.flight) ? h('span',{class:'small '+(over?'text-danger':'muted'), style:{marginLeft:'auto'}}, dp.travelOnly ? `${modeOf(it.mode)[1]} ${it.distanceKm.toFixed(1)}km / 移動${UI.fmtMin(it.durationMin)}${it.estimated?'(推定)':''}` : `${it.distanceKm.toFixed(1)}km / 移動${UI.fmtMin(it.durationMin)} / 終了 ${fmtT(it.end)}${it.estimated?'(推定)':''}${over?' ⚠ 業務終了を超過':''}`) : null),
+              it && !(it.travel && it.travel.flight) ? h('span',{class:'small '+(over?'text-danger':'muted'), style:{marginLeft:'auto'}}, dp.travelOnly ? ((it.segments && it.segments.length && it.segments.every(x=>x.min != null)) ? `${it.segments.map(x=>modeOf(x.mode)[1]).join('')} 移動 約${UI.fmtMin(it.segments.reduce((a,x)=>a+x.min,0))}(目安)` : `${modeOf(it.mode)[1]} ${it.distanceKm.toFixed(1)}km / 移動${UI.fmtMin(it.durationMin)}${it.estimated?'(推定)':''}`) : `${it.distanceKm.toFixed(1)}km / 移動${UI.fmtMin(it.durationMin)} / 終了 ${fmtT(it.end)}${it.estimated?'(推定)':''}${over?' ⚠ 業務終了を超過':''}`) : null),
             (day.warnings||[]).length ? h('div',{class:'notice text-danger small'}, day.warnings.map(w=>h('div',null,'⚠ '+w))) : null,
             placesRow,
             dp.memo ? (/→|->/.test(dp.memo)
-              ? h('div',{class:'row small', style:{gap:'4px', alignItems:'center', flexWrap:'wrap', marginBottom:'6px'}}, h('span',null,'🧭 経路:'), ...dp.memo.split(/\s*(?:→|->)\s*/).filter(Boolean).flatMap((pt,k,arr)=>[h('span',{class:'badge'+((ds && pt===ds.label) || (de && pt===de.label) ? ' done' : '')}, pt), k < arr.length-1 ? h('span',{class:'muted'},'→') : null]).filter(Boolean), h('button',{class:'btn sm', style:{padding:'2px 8px', marginLeft:'4px'}, onClick:()=>editMemo(day.date, di)}, '変更'))
+              ? (()=>{ const pts = splitRoute(dp.memo); const segs = (it && it.segments) || []; const total = segs.length && segs.every(x=>x.min != null) ? segs.reduce((a,x)=>a+x.min,0) : null;
+                  return h('div',{style:{marginBottom:'6px'}},
+                    h('div',{class:'row small', style:{gap:'6px', alignItems:'center', flexWrap:'wrap'}}, h('span',null,'🧭 経路'), total != null ? h('span',{class:'muted'}, `合計 約${UI.fmtMin(total)}(目安)`) : null, h('button',{class:'btn sm', style:{padding:'2px 8px'}, onClick:()=>editMemo(day.date, di)}, '行程を編集')),
+                    h('div',{class:'list', style:{marginTop:'4px'}}, pts.slice(0, -1).map((a, k)=>{ const b = pts[k+1]; const sg = segs[k]; const isLocal = !!(ds && de && a === ds.label && b === de.label); const cur = (sg && sg.mode) || segModeOf(day.date, k, a, b, ds, de);
+                      return h('div',{class:'row small', style:{gap:'6px', alignItems:'center', flexWrap:'wrap', padding:'2px 0'}},
+                        h('span',{class:'badge'+(isLocal?' done':'')}, a), h('span',{class:'muted'},'→'), h('span',{class:'badge'+(isLocal?' done':'')}, b),
+                        h('select',{class:'sm', style:{width:'auto', minHeight:'28px', padding:'2px 6px'}, title:'この区間の移動手段', onChange:(e)=>setSegMode(day, k, e.target.value, isLocal)}, SEG_MODES.map(([mk, ic, lb])=>h('option',{value:mk, selected: cur === mk}, `${ic} ${lb}`))),
+                        h('span',{class:'muted'}, sg ? (sg.min != null ? `約${UI.fmtMin(sg.min)}${sg.km ? ` (${sg.km.toFixed(0)}km)` : ''}${sg.estimated ? ' 目安' : ''}` : '場所が見つからず時間は未計算') : ''));
+                    })));
+                })()
               : h('div',{class:'row small', style:{gap:'6px', alignItems:'center', marginBottom:'6px'}}, h('span',null, `📝 ${dp.memo}`), h('button',{class:'btn sm', style:{padding:'2px 8px'}, onClick:()=>editMemo(day.date, di)}, '変更')))
-              : (dp.travelOnly ? h('div',{class:'row small', style:{marginBottom:'6px'}}, h('button',{class:'btn sm', style:{padding:'2px 8px'}, onClick:()=>editMemo(day.date, di)}, '＋ 経路・メモを書く')) : null),
+              : (dp.travelOnly ? h('div',{class:'row small', style:{marginBottom:'6px'}}, h('button',{class:'btn sm', style:{padding:'2px 8px'}, onClick:()=>editMemo(day.date, di)}, '＋ 行程を作る')) : null),
+            dp.note ? h('div',{class:'small', style:{marginBottom:'6px'}}, `📝 ${dp.note}`) : null,
             dp.startTime ? h('div',{class:'small muted', style:{marginBottom:'6px'}}, `この日の活動開始 ${dp.startTime}`) : null,
-            it && it.travel ? h('div',{class:'small', style:{marginBottom:'6px'}}, it.travel.flight ? `✈️ 移動 ${it.travel.from} → ${it.travel.to}(飛行機などの移動。所要時間は計算していません)` : `${modeOf(it.mode)[1]} ${modeOf(it.mode)[2]}で移動 ${it.travel.from} → ${it.travel.to} ・ ${UI.fmtMin(it.travel.min)}${it.travel.km ? ` (${it.travel.km.toFixed(1)}km)` : ''}${it.byMode ? '(目安: 直線距離から推定、乗り換え・待ち込み)' : it.estimated ? '(推定)' : ''}`) : null,
+            it && it.travel && !(it.segments && it.segments.length) ? h('div',{class:'small', style:{marginBottom:'6px'}}, it.travel.flight ? `✈️ 移動 ${it.travel.from} → ${it.travel.to}(飛行機などの移動。所要時間は計算していません)` : `${modeOf(it.mode)[1]} ${modeOf(it.mode)[2]}で移動 ${it.travel.from} → ${it.travel.to} ・ ${UI.fmtMin(it.travel.min)}${it.travel.km ? ` (${it.travel.km.toFixed(1)}km)` : ''}${it.byMode ? '(目安: 直線距離から推定、乗り換え・待ち込み)' : it.estimated ? '(推定)' : ''}`) : null,
             dp.travelOnly && !dp.memo && !(ds && de && !samePt(ds, de)) ? h('div',{class:'small text-warn', style:{marginBottom:'6px'}}, '移動日です。「出発」「帰着」で空港や次の宿を設定すると移動の行程が出ます') : null,
             day.stops.length ? list : h('div',{class:'small muted'}, dp.travelOnly ? '移動日(訪問なし)' : 'この日は訪問なし'),
             h('div',{class:'row mt'},
@@ -842,9 +937,10 @@
           });
           const di = p.days.indexOf(day); const ds = resolveStart(pdates0, di), de = resolveEnd(pdates0, di);
           if (!day.stops.length){
-            const dpm = (state.dayPlaces[day.date] || {}).memo || '';
-            if (it && it.travel){ const ws0 = toMin((state.dayPlaces[day.date]||{}).startTime) ?? toMin(state.workStart) ?? 540; const fl = it.travel.flight; Store.save('events', { date: day.date, start: fl ? '' : fmtT(ws0).slice(0,5), end: fl ? '' : fmtT(Math.min(ws0 + it.travel.min, 1439)).slice(0,5), title: (/→|->/.test(dpm) ? `移動 ${dpm.replace(/\s*->\s*/g,'→').slice(0,60)}` : `移動 ${it.travel.from} → ${it.travel.to}`) + (it.travel.flight ? '' : `(${modeOf(it.mode)[2]})`), type:'move', customerId:'', address: de ? (de.address||de.label||'') : '', lat: de ? de.lat : null, lng: de ? de.lng : null, memo: [dpm, fl ? '営業計画の移動日(飛行機などの移動)' : `営業計画の移動日(${UI.fmtMin(it.travel.min)}${it.travel.km ? ` / ${it.travel.km.toFixed(1)}km` : ''})`].filter(Boolean).join('\n'), status:'planned', attachmentIds:[], planId }); ev++; }
-            else if (dpm){ Store.save('events', { date: day.date, start:'', end:'', title: `移動日: ${dpm.slice(0,40)}`, type:'move', customerId:'', address:'', lat:null, lng:null, memo: dpm, status:'planned', attachmentIds:[], planId }); ev++; }
+            const dpm0 = [(state.dayPlaces[day.date] || {}).memo || '', (state.dayPlaces[day.date] || {}).note || ''].filter(Boolean).join('\n');
+            const dpm = it && it.segments && it.segments.length ? dpm0 + '\n' + it.segments.map(x=>`${x.from}→${x.to} ${modeOf(x.mode)[2]}${x.min != null ? ` 約${UI.fmtMin(x.min)}` : ''}`).join('\n') : dpm0;
+            if (it && it.travel){ const ws0 = toMin((state.dayPlaces[day.date]||{}).startTime) ?? toMin(state.workStart) ?? 540; const fl = it.travel.flight; Store.save('events', { date: day.date, start: fl ? '' : fmtT(ws0).slice(0,5), end: fl ? '' : fmtT(Math.min(ws0 + it.travel.min, 1439)).slice(0,5), title: (/→|->/.test(dpm0) ? `移動 ${splitRoute(dpm0.split('\n')[0]).join('→').slice(0,60)}` : `移動 ${it.travel.from} → ${it.travel.to}`) + (it.travel.flight ? '' : `(${modeOf(it.mode)[2]})`), type:'move', customerId:'', address: de ? (de.address||de.label||'') : '', lat: de ? de.lat : null, lng: de ? de.lng : null, memo: [dpm, fl ? '営業計画の移動日(飛行機などの移動)' : `営業計画の移動日(${UI.fmtMin(it.travel.min)}${it.travel.km ? ` / ${it.travel.km.toFixed(1)}km` : ''})`].filter(Boolean).join('\n'), status:'planned', attachmentIds:[], planId }); ev++; }
+            else if (dpm){ Store.save('events', { date: day.date, start:'', end:'', title: /→|->/.test(dpm0) ? `移動 ${splitRoute(dpm0.split('\n')[0]).join('→').slice(0,60)}` : `移動日: ${dpm.split('\n')[0].slice(0,40)}`, type:'move', customerId:'', address:'', lat:null, lng:null, memo: dpm, status:'planned', attachmentIds:[], planId }); ev++; }
             continue;
           }
           Store.save('routes', { planId, date: day.date, name:`営業計画 ${UI.fmtDate(day.date)}`, startLabel: ds ? ds.label : (state.startLabel||'出発地'), startAddress: ds ? ds.address : state.startAddress, startLat: ds ? ds.lat : null, startLng: ds ? ds.lng : null, roundTrip: !!(de && ds && samePt(de, ds)), departTime: (state.dayPlaces[day.date]||{}).startTime || state.workStart,
