@@ -209,8 +209,11 @@
     const ws = toMin(opt.workStart) ?? 540; let t = ws; const rows = [];
     day.stops.forEach((s,i)=>{ const leg = r.legs?.[i] || {durationMin:0, distanceKm:0}; let arr = t + leg.durationMin; let wait = 0; if (s.timeFrom && toMin(s.timeFrom) > arr){ wait = toMin(s.timeFrom) - arr; arr = toMin(s.timeFrom); } const late = s.timeTo && arr > toMin(s.timeTo); const dep = arr + stay(s); rows.push({ stop:s, arr, dep, wait, late, legKm:leg.distanceKm, legMin:leg.durationMin }); t = dep; });
     let backMin = 0, backKm = 0; if (opt.roundTrip && day.stops.length){ const leg = r.legs?.[day.stops.length]; if (leg){ backMin = leg.durationMin; backKm = leg.distanceKm; } }
-    return { rows, distanceKm: r.distanceKm, durationMin: r.durationMin, estimated: r.estimated, end: t + backMin, backMin, backKm };
+    return { rows, distanceKm: r.distanceKm, durationMin: r.durationMin, estimated: r.estimated, end: t + backMin, backMin, backKm, geometry: r.geometry || [] };
   }
+
+  const DAY_COLORS = ['#1f6fdb','#e0532f','#2e9e5b','#8e44ad','#d9a400','#17a2b8','#c2185b','#5d6d7e'];
+  const dayColor = i => DAY_COLORS[i % DAY_COLORS.length];
 
   /* ---------- ページ ---------- */
   App.register('plan', {
@@ -445,6 +448,42 @@
         saveDraft();
       }
       async function recompute(day){ const start = { lat:Number(state.startLat), lng:Number(state.startLng) }; state.plan.itins[day.date] = await itinerary(start, day, state); saveDraft(); renderPlan(); }
+      /* その日の行程を地図アプリで開く。日本なら Googleマップ、韓国なら NAVER マップ(Google は韓国で車ルート案内が制限されるため)。
+         NAVER はアプリの URL スキーム(経由地は5か所まで、スマホにアプリが必要)。PC では出発地→最終目的地のウェブ版リンク */
+      const inKorea = p => Number(p.lat) >= 33 && Number(p.lat) <= 39 && Number(p.lng) >= 124 && Number(p.lng) <= 132;
+      const isMobile = /iPhone|iPad|Android/i.test(navigator.userAgent);
+      function dayPoints(day){ const st = { lat:Number(state.startLat), lng:Number(state.startLng), label: state.startLabel||'出発地' }; return [st, ...day.stops.filter(hasCoord).map(s=>({lat:Number(s.lat), lng:Number(s.lng), label:s.label||s.name||''})), ...(state.roundTrip?[st]:[])].filter(hasCoord); }
+      function naverLinks(pts){
+        const app = 'appname=' + encodeURIComponent(location.origin || 'eigyo-support');
+        const links = [];
+        for (let i = 0; i + 1 < pts.length; i += 6){ // 出発 + 経由地5 + 目的地 = 7点ずつ。次の区間は前の目的地から
+          const seg = pts.slice(i, i + 7); const s0 = seg[0], d = seg[seg.length-1], vias = seg.slice(1, -1);
+          const q = [`slat=${s0.lat}`, `slng=${s0.lng}`, `sname=${encodeURIComponent(s0.label)}`, `dlat=${d.lat}`, `dlng=${d.lng}`, `dname=${encodeURIComponent(d.label)}`, ...vias.map((v,k)=>`v${k+1}lat=${v.lat}&v${k+1}lng=${v.lng}&v${k+1}name=${encodeURIComponent(v.label)}`), app].join('&');
+          links.push({ app: `nmap://route/car?${q}`, from: s0.label, to: d.label, vias: vias.length });
+        }
+        // PC のウェブ版は経由地を渡せないので、出発地 → 最終訪問先(往復の戻りは省く)の1本だけ
+        const last = (pts.length > 2 && pts[pts.length-1].lat === pts[0].lat && pts[pts.length-1].lng === pts[0].lng) ? pts[pts.length-2] : pts[pts.length-1];
+        const web = { href: `https://map.naver.com/p/directions/${pts[0].lng},${pts[0].lat},${encodeURIComponent(pts[0].label)}/${last.lng},${last.lat},${encodeURIComponent(last.label)}/-/car`, from: pts[0].label, to: last.label };
+        return { links, web };
+      }
+      function openNaver(day){
+        const pts = dayPoints(day); if (pts.length < 2){ toast('座標のある訪問先がありません', {error:true}); return; }
+        const { links, web } = naverLinks(pts);
+        const body = h('div', null,
+          h('p',{class:'small muted'}, isMobile ? 'NAVER マップのアプリが開きます(インストールが必要)。経由地は1回に5か所までなので、多い日は区間ごとに分けています。' : 'PC のブラウザでは経由地を渡せないため、出発地 → 最終訪問先のリンクです。スマホで開くとアプリに経由地まで渡せます。'),
+          h('div',{class:'list'}, isMobile
+            ? links.map((l,i)=>h('a',{class:'btn', href:l.app, style:{display:'block', marginBottom:'6px'}}, `${links.length>1?`区間${i+1}: `:''}${l.from} → ${l.to}${l.vias?`(経由 ${l.vias}か所)`:''}`))
+            : h('a',{class:'btn', href:web.href, target:'_blank', rel:'noopener', style:{display:'block'}}, `${web.from} → ${web.to}`)));
+        UI.modal({ title:'NAVER マップで開く', body, actions:[{label:'閉じる', onClick:()=>{}}] });
+      }
+      function navButtons(day){
+        if (!day.stops.some(hasCoord)) return []; // 訪問のない日はボタンなし
+        const pts = dayPoints(day); if (pts.length < 2) return [];
+        const korea = pts.some(inKorea);
+        const g = h('a',{class:'btn sm'+(korea?'':' primary'), href: Geo.gmapsUrl(pts.slice(0,11)), target:'_blank', rel:'noopener', title: korea ? '韓国では Google の車ルート案内が制限されます' : 'Googleマップで経路を開く(経由地は9か所まで)'}, '🗺️ Googleマップ');
+        const n = h('button',{class:'btn sm'+(korea?' primary':''), title:'NAVER マップで経路を開く(韓国向け)', onClick:()=>openNaver(day)}, '🟢 NAVERマップ');
+        return korea ? [n, g] : [g, n];
+      }
       function renderPlan(){
         UI.clear(planEl);
         const p = state.plan;
@@ -475,10 +514,37 @@
             day.stops.length ? list : h('div',{class:'small muted'}, 'この日は訪問なし'),
             h('div',{class:'row mt'},
               h('button',{class:'btn sm', onClick: async()=>{ const start={lat:Number(state.startLat),lng:Number(state.startLng)}; try { const r = await Geo.optimize(start, day.stops, {roundTrip:state.roundTrip}); day.stops = r.stops; await recompute(day); toast('並べ直しました'); } catch(e){ toast(e.message,{error:true}); } }}, '✨ この日を最適化'),
-              h('a',{class:'btn sm', href: Geo.gmapsUrl([{lat:Number(state.startLat),lng:Number(state.startLng)}, ...day.stops, ...(state.roundTrip?[{lat:Number(state.startLat),lng:Number(state.startLng)}]:[])].slice(0,11)), target:'_blank', rel:'noopener'}, '🗺️ Googleマップ'),
+              ...navButtons(day),
               h('a',{class:'btn sm', href:`#/route?date=${day.date}`}, '🚗 ルート画面(反映後)'))
           ));
         });
+        /* 全日程を1枚の地図に(日ごとに色分け) */
+        if (typeof L !== 'undefined' && p.days.some(d=>d.stops.some(hasCoord))){
+          const mapEl = h('div',{class:'map', style:{height:'480px'}});
+          const legend = h('div',{class:'row small mt', style:{gap:'10px', flexWrap:'wrap'}}, p.days.map((d,i)=>h('span',{class:'row', style:{gap:'4px', alignItems:'center'}}, h('span',{style:{display:'inline-block', width:'12px', height:'12px', borderRadius:'50%', background:dayColor(i)}}), `${i+1}日目 ${UI.fmtDate(d.date)}(${d.stops.length}件)`)), h('span',{class:'muted'}, 'S = 出発地。点線 = 道路経路が取れず直線で推定'));
+          planEl.appendChild(h('div',{class:'card'}, h('h2',null, '全日程の地図'), mapEl, legend));
+          setTimeout(()=>{
+            try {
+              const map = L.map(mapEl, {scrollWheelZoom:false});
+              L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {attribution:'&copy; OpenStreetMap contributors', maxZoom:19}).addTo(map);
+              const pts = [];
+              const start = { lat:Number(state.startLat), lng:Number(state.startLng) };
+              if (hasCoord(start)){ L.marker([start.lat, start.lng], {icon: L.divIcon({className:'num-marker start', html:'S', iconSize:[26,26], iconAnchor:[13,13], popupAnchor:[0,-12]})}).addTo(map).bindPopup(h('div',null, h('b',null, state.startLabel||'出発地'), h('div',{class:'small muted'}, state.startAddress||''))); pts.push([start.lat, start.lng]); }
+              p.days.forEach((d, di)=>{
+                const it = p.itins[d.date]; const col = dayColor(di);
+                if (!d.stops.some(hasCoord)) return; // 訪問のない日は線を引かない
+                if (it && it.geometry && it.geometry.length > 1){ L.polyline(it.geometry, {color:col, weight:4, opacity:.75, dashArray: it.estimated ? '8 8' : null}).addTo(map); }
+                else { const line = [start, ...d.stops.filter(hasCoord), ...(state.roundTrip?[start]:[])].filter(hasCoord).map(q=>[Number(q.lat),Number(q.lng)]); if (line.length > 1) L.polyline(line, {color:col, weight:3, opacity:.6, dashArray:'8 8'}).addTo(map); }
+                d.stops.forEach((st, i)=>{ if (!hasCoord(st)) return; const row = it?.rows?.[i];
+                  L.marker([Number(st.lat), Number(st.lng)], {icon: L.divIcon({className:'num-marker', html:`<span style="background:${col}">${i+1}</span>`, iconSize:[26,26], iconAnchor:[13,13], popupAnchor:[0,-12]})}).addTo(map)
+                    .bindPopup(h('div',null, h('b',null, st.label||''), st.name ? h('div',{class:'small'}, st.name) : null, h('div',{class:'small muted'}, `${di+1}日目 ${UI.fmtDate(d.date)}${row ? ' ' + fmtT(row.arr) + ' 着' : ''}`), h('div',{class:'small muted'}, st.address||'')));
+                  pts.push([Number(st.lat), Number(st.lng)]); });
+              });
+              map.invalidateSize();
+              if (pts.length === 1) map.setView(pts[0], 14); else if (pts.length) map.fitBounds(L.latLngBounds(pts), {padding:[30,30]});
+            } catch(e){ console.warn('plan map failed', e); legend.textContent = '地図の表示に失敗しました: ' + (e.message||e); }
+          }, 60);
+        }
         if (p.unassigned.length){
           planEl.appendChild(h('div',{class:'card'}, h('h2',null,'未割当', h('span',{class:'small muted'}, ` ${p.unassigned.length}件(日数を増やすか、各日に移してください)`)),
             h('div',{class:'stop-list'}, p.unassigned.map(s=>h('div',{class:'stop'}, h('span',{class:'num', style:{background:'var(--muted)'}}, '−'),

@@ -249,6 +249,7 @@ a.item{color:inherit}
 .stop .ctl .btn{padding:4px 7px}
 .num-marker{width:26px;height:26px;border-radius:50%;background:var(--primary);color:var(--primary-ink);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:.85rem;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.45)}
 .num-marker.start{background:var(--ok);color:#fff}
+.num-marker>span{display:flex;align-items:center;justify-content:center;width:100%;height:100%;border-radius:50%;color:#fff} /* 日ごとの色(営業計画の全日程地図) */
 .text-warn{color:var(--warn);font-weight:600}
 .text-danger{color:var(--danger);font-weight:600}
 table.tbl tr.text-danger td{color:var(--danger)}
