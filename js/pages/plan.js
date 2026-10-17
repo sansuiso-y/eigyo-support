@@ -367,6 +367,7 @@
           h('span',{style:{flex:1}}),
           h('button',{class:'btn sm', title:'登録済みの名刺と自動で照合し直します(名刺を取り込んだ後に)', onClick:()=>{ let n=0; state.rows.forEach(r=>{ if (!(r.customerId && Store.get('customers', r.customerId))){ r.customerId=null; const c=findCustomer(r); if (c){ linkFromCard(r,c); n++; } } }); saveDraft(); renderList(); toast(n ? `${n}件を名刺と紐付けました` : '新たに一致する名刺はありませんでした'); }}, '🔗 名刺と照合'),
           h('button',{class:'btn sm', title:'座標のある訪問先を地図に表示します', onClick:()=>showMap(null)}, '🗺 地図で見る'),
+          h('a',{class:'btn sm', href:'#/analysis?f=計画', title:'訪問先の会社の規模・客層などをAIで分析'}, '🔎 企業分析'),
           h('button',{class:'btn sm', onClick:lookupAddresses, title:'住所が空の行について、会社名からAIがWeb検索で所在地を調べます(要確認)'}, '🌐 AIで住所を調べる'),
           h('button',{class:'btn sm', onClick:geocodeAll}, '📍 選択行の座標を取得'),
           h('button',{class:'btn sm', onClick:registerCustomers}, '👤 選択行を名刺に登録'),

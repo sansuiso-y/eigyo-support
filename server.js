@@ -32,7 +32,7 @@ const DATA_JSON = path.join(DATA_DIR, 'data.json');
 const FILES_JSON = path.join(DATA_DIR, 'files.json');
 const PORT = Number(process.argv[2] || process.env.PORT || 8765);
 const MAX_BODY = 200 * 1024 * 1024; // 200MB(添付の上限)
-const COLS = ['customers','events','routes','hotels','cars','reports','groups','savedPlans']; // savedPlans: 営業計画の保存(全員で共有)
+const COLS = ['customers','events','routes','hotels','cars','reports','groups','savedPlans','companyInfo']; // savedPlans: 営業計画の保存(全員で共有)
 const Auth = require('./auth');        // 名前+パスワード認証(AUTH_REQUIRED=1 のとき有効)
 const AUTH = Auth.enabled;
 const BUILD = Date.now().toString(36); // 起動(デプロイ)ごとに変わる版番号

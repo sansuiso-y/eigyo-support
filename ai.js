@@ -5,6 +5,7 @@
  *   POST /api/lookup   … 会社名から所在地を Google 検索付きで調べる(要確認として扱う)
  *   POST /api/cards    … 名刺の写真(1枚に複数枚写っていてもよい)を読み取り、顧客の項目にする
  *   POST /api/hotels   … 各日の訪問内容から、泊まるのにおすすめのホテルを Google 検索付きで提案する
+ *   POST /api/analyze  … 取引先の会社を分析(規模・年商・社員数・事業・客層・提案ポイント)。Google 検索付き
  * 環境変数 GEMINI_API_KEY が必要(他の社内アプリと共用)。未設定なら 503 を返す。
  */
 'use strict';
@@ -264,6 +265,37 @@ async function hotels(input){
   return { days: res, note: str(out.note).slice(0,300) };
 }
 
+/* 企業分析: 会社の規模(年商・社員数・設立)、事業内容、客層・ターゲット、日本との関わり、営業の提案ポイントを Google 検索付きで調べる。
+   見つからない項目は「不明」。数値は年度と出典つき。1回3社まで(検索に時間がかかるため) */
+const SCALES = ['大手','中堅','中小','零細','不明'];
+async function analyze(input){
+  const rows = (Array.isArray(input.companies) ? input.companies : []).slice(0, 3).map(r=>({ key:str(r.key).slice(0,80), company:str(r.company).slice(0,120), name:str(r.name).slice(0,60), title:str(r.title).slice(0,40), address:str(r.address).slice(0,200), category:str(r.category).slice(0,40), website:str(r.website).slice(0,200) })).filter(r=>r.key && r.company);
+  if (!rows.length){ const e = new Error('分析する会社がありません'); e.status=400; throw e; }
+  const me = str(input.me).slice(0, 200) || '日本の温泉旅館・ホテル';
+  const system = `あなたは営業リサーチの担当者です。取引先候補の会社をWeb検索で調べ、JSONだけを出力します(前置き・説明・コードブロック記号は不要)。
+出力形式: {"results":[{"key":"...","officialName":"正式名称(現地表記)","scale":"大手|中堅|中小|零細|不明","revenue":"年商・売上(通貨と年度つき。例: 約35億ウォン(2023年))","employees":"社員数(年度つき。例: 12名(2024年))","founded":"設立年","ceo":"代表者","hq":"本社所在地","business":"主な事業(1〜2文)","products":"主力の商品・サービス(海外旅行・国内旅行・団体/個人/インセンティブ・日本向けツアーの有無など)","customers":"客層・ターゲット(個人/法人/団体、年齢層、地域、販売チャネル)","japan":"日本(特に福島・東北)との関わりや実績","salesPoints":"${me}が営業するときの提案のポイントを2〜3点、日本語で","confidence":"high|medium|low","sources":["根拠にしたページのURLまたはサイト名"],"note":"注意点(同名企業の可能性、情報の古さなど)"}]}
+ルール:
+- 韓国の会社は 사업자 정보、크레딧잡(kreditjob)、잡코리아、사람인、잡플래닛、나이스기업정보、DART(전자공시)、관광사업 등록、会社のホームページなどを探す。日本の会社は 帝国データバンク・会社HP・求人情報など。
+- 数値(年商・社員数)は見つかったものだけを、年度と出典の分かる形で書く。推測や計算で作らない。見つからなければ「不明」。
+- 住所・代表者名・担当者名で同名企業を見分ける。確信が持てなければ confidence を low にし note に書く。
+- scale の目安: 社員数 〜10名=零細、〜50名=中小、〜300名=中堅、それ以上または上場=大手。数値が無ければ事業内容から判断し、判断できなければ「不明」。
+- 文章(business, products, customers, japan, salesPoints, note)は必ず日本語で書く。韓国語の資料を読んでも日本語に訳して書く(会社名・住所・人名だけは現地表記のままでよい)。
+- salesPoints は「・」で始まる箇条書きを改行で区切って2〜3行。
+- confidence: 年商・社員数などの数値を公的・信頼できる出典で確認できた=high、会社の実在と事業内容は確認できたが数値は不明=medium、同名企業と区別できない・情報がほとんど無い=low。`;
+  const list = rows.map(r=>`key=${r.key} | 会社=${r.company}${r.name?` | 担当者=${r.name}${r.title?`(${r.title})`:''}`:''}${r.address?` | 住所=${r.address}`:''}${r.category?` | 区分=${r.category}`:''}${r.website?` | Web=${r.website}`:''}`).join('\n');
+  const out = await gemini({ parts:[{ text:`次の会社を調べて分析してください。\n${list}` }], system, tools:[{ google_search:{} }] });
+  const keys = new Set(rows.map(r=>r.key));
+  const results = (Array.isArray(out.results) ? out.results : []).filter(r=>r && typeof r === 'object' && keys.has(str(r.key))).map(r=>({
+    key:str(r.key), officialName:str(r.officialName).slice(0,150), scale: SCALES.includes(str(r.scale)) ? str(r.scale) : '不明',
+    revenue:str(r.revenue).slice(0,150), employees:str(r.employees).slice(0,100), founded:str(r.founded).slice(0,40), ceo:str(r.ceo).slice(0,80), hq:str(r.hq).slice(0,200),
+    business:str(r.business).slice(0,500), products:str(r.products).slice(0,500), customers:str(r.customers).slice(0,500), japan:str(r.japan).slice(0,500), salesPoints:str(r.salesPoints).slice(0,800),
+    confidence: ['high','medium','low'].includes(str(r.confidence)) ? str(r.confidence) : 'low',
+    sources: (Array.isArray(r.sources) ? r.sources : []).map(x=>str(x).slice(0,300)).filter(Boolean).slice(0,8), note:str(r.note).slice(0,400) }));
+  const unknown = v => !v || /^(不明|unknown|-|なし)$/i.test(v);
+  results.forEach(r=>{ if (r.confidence === 'high' && unknown(r.revenue) && unknown(r.employees)) r.confidence = 'medium'; });   // 数値の裏付けが無いのに「高」は付けない
+  return { results };
+}
+
 /* 住所検索: 会社名(+地域ヒント)から所在地を Google 検索付きで調べる。結果は必ず「要確認」として扱う */
 async function lookup(input){
   const rows = (Array.isArray(input.rows) ? input.rows : []).slice(0, 20).map(r=>({ key:str(r.key), company:str(r.company), name:str(r.name), hint:str(r.hint) })).filter(r=>r.company || r.name);
@@ -284,7 +316,7 @@ function hhmm(v){ const m = /^(\d{1,2}):(\d{2})/.exec(String(v||'')); if (!m) re
 /* server.js から呼ぶ: 処理できたら true、対象外なら false */
 async function handle(req, res, url, { readBody, send }){
   const parts = url.pathname.split('/').filter(Boolean);
-  if (parts[0] !== 'api' || !['extract','assist','lookup','cards','hotels'].includes(parts[1])) return false;
+  if (parts[0] !== 'api' || !['extract','assist','lookup','cards','hotels','analyze'].includes(parts[1])) return false;
   if (req.method !== 'POST'){ send(res, 405, { error:'method not allowed' }); return true; }
   const limit = (parts[1] === 'extract' || parts[1] === 'cards') ? MAX_FILE : 2*1024*1024;
   const declared = Number(req.headers['content-length'] || 0);
@@ -297,9 +329,9 @@ async function handle(req, res, url, { readBody, send }){
       send(res, 200, out);
     } else {
       let json; try { json = JSON.parse((await readBody(req, 2*1024*1024)).toString('utf8')); } catch(e){ send(res, 400, { error:'invalid json' }); return true; }
-      send(res, 200, parts[1] === 'assist' ? await assist(json) : parts[1] === 'hotels' ? await hotels(json) : await lookup(json));
+      send(res, 200, parts[1] === 'assist' ? await assist(json) : parts[1] === 'hotels' ? await hotels(json) : parts[1] === 'analyze' ? await analyze(json) : await lookup(json));
     }
   } catch(e){ console.error('[ai]', e.message); send(res, e.status || 500, { error: e.message || 'AI処理に失敗しました' }); }
   return true;
 }
-module.exports = { handle, extract, assist, lookup, cards, hotels, parseRoutes };
+module.exports = { handle, extract, assist, lookup, cards, hotels, parseRoutes, analyze };
