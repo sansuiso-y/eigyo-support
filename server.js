@@ -32,7 +32,7 @@ const DATA_JSON = path.join(DATA_DIR, 'data.json');
 const FILES_JSON = path.join(DATA_DIR, 'files.json');
 const PORT = Number(process.argv[2] || process.env.PORT || 8765);
 const MAX_BODY = 200 * 1024 * 1024; // 200MB(添付の上限)
-const COLS = ['customers','events','routes','hotels','cars','reports','groups'];
+const COLS = ['customers','events','routes','hotels','cars','reports','groups','savedPlans']; // savedPlans: 営業計画の保存(全員で共有)
 const Auth = require('./auth');        // 名前+パスワード認証(AUTH_REQUIRED=1 のとき有効)
 const AUTH = Auth.enabled;
 const BUILD = Date.now().toString(36); // 起動(デプロイ)ごとに変わる版番号
@@ -61,6 +61,8 @@ function writeAtomic(file, data){
 function writeJsonAtomic(file, obj){ writeAtomic(file, JSON.stringify(obj, null, 1)); }
 
 let data = readJson(DATA_JSON, null);           // { version, settings, data:{col:[...]}, updatedAt }
+// 起動時に形をそろえる(後から増えたコレクション、例: savedPlans、が既存の data.json に無くても扱えるように)
+if (data) data = normalizeData(data);
 let filesMeta = readJson(FILES_JSON, {});       // { id: {id,name,type,size,linkedKind,linkedId,createdAt,updatedAt} }
 
 function emptyData(){ const d = {}; COLS.forEach(c=>d[c]=[]); return { version:1, settings:{}, data:d, updatedAt:null }; }
@@ -68,6 +70,7 @@ function normalizeData(json){
   const out = emptyData();
   if (json && typeof json === 'object'){
     if (json.settings && typeof json.settings === 'object') out.settings = json.settings;
+    if (json.updatedAt) out.updatedAt = json.updatedAt;
     const src = (json.data && typeof json.data === 'object') ? json.data : {};
     COLS.forEach(c=>{ out.data[c] = Array.isArray(src[c]) ? src[c] : []; });
   }

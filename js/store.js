@@ -1,7 +1,7 @@
 /* Store: localStorage-backed collections + IndexedDB files (+ optional server sync) */
 (function(){
   const PREFIX = 'sales.';
-  const COLS = ['customers','events','routes','hotels','cars','reports','groups'];
+  const COLS = ['customers','events','routes','hotels','cars','reports','groups','savedPlans']; // savedPlans: 営業計画の保存(全員で共有)
   const cache = {};
   const listeners = {};
 

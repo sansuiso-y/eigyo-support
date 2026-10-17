@@ -498,12 +498,13 @@
         const p = state.plan; if (!p) return;
         const total = p.days.reduce((a,d)=>a+d.stops.length,0);
         const existing = p.days.flatMap(d=>Store.where('events', e=>e.date===d.date && e.type==='visit'));
-        const prevCount = Store.where('events', e=>e.planId===state.id).length;
-        const others = existing.filter(e=>e.planId!==state.id).length;
+        const planKey = state.savedId || state.id; // 保存した計画なら保存IDで予定を紐付ける(別の計画や別端末の予定を消さない・重複させない)
+        const prevCount = Store.where('events', e=>e.planId===planKey).length;
+        const others = existing.filter(e=>e.planId!==planKey).length;
         const ok = await UI.confirm(`${p.days.length}日分・${total}件の訪問予定を登録します。${prevCount?`前回この計画で登録した ${prevCount} 件は置き換えます。`:''}${others?`対象日には別の訪問予定が ${others} 件あります。`:''}`, {ok:'登録する', danger:false});
         if (!ok) return;
         saveDraft();
-        const planId = state.id;
+        const planId = planKey;
         const prevEv = Store.where('events', e=>e.planId===planId), prevRt = Store.where('routes', r=>r.planId===planId);
         prevEv.forEach(e=>Store.remove('events', e.id)); prevRt.forEach(r=>Store.remove('routes', r.id));
         let ev=0, skipped=0;
@@ -536,9 +537,61 @@
       }
 
       /* ===== 描画 ===== */
+      /* ===== 保存した計画(全員で共有。端末内の下書きとは別) ===== */
+      const SAVE_KEYS = ['rows','filter','onlyNew','startDate','days','workStart','workEnd','roundTrip','startAddress','startLat','startLng','startLabel'];
+      function snapshot(name){
+        const o = { name };
+        SAVE_KEYS.forEach(k=>{ o[k] = JSON.parse(JSON.stringify(state[k] === undefined ? null : state[k])); });
+        o.plan = state.plan ? { days: JSON.parse(JSON.stringify(state.plan.days||[])), unassigned: JSON.parse(JSON.stringify(state.plan.unassigned||[])) } : null; // 行程(itins)は開いたときに計算し直す
+        o.savedBy = Store.settings().userName || '';
+        return o;
+      }
+      const savedInfo = h('span',{class:'small muted'});
+      function refreshSaved(){
+        const rec = state.savedId && Store.get('savedPlans', state.savedId);
+        savedInfo.textContent = rec ? `保存済み: ${rec.name}(${UI.fmtDateTime(rec.updatedAt)}${rec.savedBy ? ' ' + rec.savedBy : ''})` : '未保存(下書きはこの端末に自動保存)';
+      }
+      async function savePlan(){
+        if (!state.rows.length){ toast('保存する訪問先がありません', {error:true}); return; }
+        const cur = state.savedId && Store.get('savedPlans', state.savedId);
+        const def = cur ? cur.name : `${UI.fmtDate(state.startDate)}〜 営業計画`;
+        const name = await UI.prompt('計画を保存', { label:'計画の名前(同じ名前なら上書き、変えると別の計画として保存)', value: def, placeholder:'例: 10月 清州出張' });
+        if (name === null) return; const nm = String(name).trim() || def;
+        const same = Store.list('savedPlans').find(p=>p.name === nm) || null; // 同じ名前の計画(いま開いているものでも、他の人が保存したものでも)
+        if (same && !(cur && same.id === cur.id) && !(await UI.confirm(`「${nm}」はすでに保存されています(${UI.fmtDateTime(same.updatedAt)}${same.savedBy ? ' ' + same.savedBy : ''})。上書きしますか?`, {ok:'上書き', danger:false}))) return;
+        const rec = snapshot(nm);
+        if (same){ rec.id = same.id; rec.createdAt = same.createdAt; }
+        const saved = Store.save('savedPlans', rec);
+        state.savedId = saved.id; saveDraft(); refreshSaved();
+        toast(same ? `「${nm}」に上書き保存しました` : `「${nm}」として保存しました(全員で共有)`, {ms:4000});
+      }
+      function openPlanList(){
+        const list = Store.list('savedPlans').sort((a,b)=>String(b.updatedAt||'').localeCompare(String(a.updatedAt||'')));
+        let m;
+        const body = h('div',{class:'list'}, list.length ? list.map(p => h('div',{class:'file-row', style:{alignItems:'center'}},
+          h('div',{style:{flex:1, minWidth:0}}, h('div',null, h('b',null, p.name || '(名前なし)'), p.id === state.savedId ? h('span',{class:'badge done', style:{marginLeft:'6px'}}, '開いている') : null),
+            h('div',{class:'small muted'}, `${UI.fmtDate(p.startDate)}〜 ${p.days||''}日 / 訪問先 ${(p.rows||[]).length}件${p.plan ? ' / 計画あり' : ''} / 更新 ${UI.fmtDateTime(p.updatedAt)}${p.savedBy ? ' ' + p.savedBy : ''}`)),
+          h('button',{class:'btn sm primary', onClick: async()=>{
+            if (state.rows.length && !(await UI.confirm((p.id === state.savedId ? '保存した時点の内容に戻しますか?' : 'いまのリストを閉じて「' + p.name + '」を開きますか?') + '(保存していない変更は消えます)', {ok:'開く', danger:false}))) return;
+            const o = JSON.parse(JSON.stringify(p)); delete o.name; delete o.savedBy; delete o.createdAt; delete o.updatedAt;
+            o.id = state.id || null; o.savedId = p.id; if (o.plan) o.plan.itins = {};
+            Store.save('plans', o);
+            m.close(); toast(`「${p.name}」を開きました`);
+            window.dispatchEvent(new HashChangeEvent('hashchange')); // 画面を下書きから描き直す
+          }}, '開く'),
+          h('button',{class:'btn sm danger', onClick: async()=>{ if (await UI.confirm(`「${p.name}」を削除しますか?(全員の一覧から消えます)`)){ Store.remove('savedPlans', p.id); if (state.savedId === p.id){ state.savedId = null; saveDraft(); refreshSaved(); } m.close(); openPlanList(); } }}, '削除')
+        )) : UI.empty('保存した計画はまだありません。「保存」を押すと、この一覧に入り全員で開けます。'));
+        m = UI.modal({ title:'保存した計画を開く', body, actions:[{label:'閉じる', onClick:()=>{}}] });
+      }
+      refreshSaved();
+      const offSaved = Store.on('savedPlans', refreshSaved);
+
       root.append(
         h('div',{class:'page-head'}, h('h1',null,'🧭 営業計画'), h('div',{class:'spacer'}), h('span',{class:'small muted'}, 'リスト取り込み → 日ごとに振り分け → 予定表へ')),
-        h('div',{class:'card'}, h('h2',null,'1. 訪問先リスト'),
+        h('div',{class:'card'}, h('div',{class:'row', style:{alignItems:'center'}}, h('h2',{style:{margin:0}}, '1. 訪問先リスト'), h('span',{style:{flex:1}}),
+            h('button',{class:'btn sm primary', title:'訪問先リストと条件・計画を名前を付けて保存します(全員で共有)', onClick:savePlan}, '💾 保存'),
+            h('button',{class:'btn sm', title:'保存した計画を開く', onClick:openPlanList}, '📂 開く')),
+          h('div',{class:'small muted', style:{marginBottom:'8px'}}, savedInfo),
           h('div',{class:'row'},
             h('button',{class:'btn', onClick:()=>camInp.click()}, '📷 写真を撮って読み取る'),
             h('button',{class:'btn', onClick:()=>fileInp.click()}, '📄 写真・PDF・Excel・CSVを取り込む'),
@@ -559,7 +612,9 @@
         h('h2',{class:'mt'}, '3. 日ごとの計画'), planEl
       );
       renderList(); renderPlan();
+      if (state.plan && state.plan.days && (!state.plan.itins || !Object.keys(state.plan.itins).length) && Number.isFinite(Number(state.startLat))){ computeAll().then(renderPlan).catch(e=>console.warn('recompute failed', e)); } // 保存した計画を開いた直後(行程は保存せず計算し直す)
       if (params.customer){ const c = Store.get('customers', params.customer); if (c && !state.rows.some(r=>r.customerId===c.id)){ state.rows.push(Object.assign(emptyRow(), {company:c.company||'', name:c.name||'', title:c.title||'', phone:c.phone||'', address:c.address||'', lat:c.lat, lng:c.lng, customerId:c.id})); saveDraft(); renderList(); } }
+      return { destroy: ()=>offSaved() }; // 画面を離れたら購読を外す
     }
   });
 })();
