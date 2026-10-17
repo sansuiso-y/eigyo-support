@@ -390,7 +390,9 @@
         if (!a){ state.startAddress = settings.homeAddress||''; state.startLat=settings.homeLat; state.startLng=settings.homeLng; state.startLabel='拠点'; }
         else { try { const g = await Geo.geocode(a); if (!g){ toast('出発地の住所が見つかりませんでした', {error:true}); return; } state.startAddress=a; state.startLat=g.lat; state.startLng=g.lng; state.startLabel=a; } catch(e){ toast(e.message,{error:true}); return; } }
         if (!hasCoord({lat:state.startLat,lng:state.startLng})){ toast('設定画面の拠点住所が未登録です。上の欄に出発地の住所を入れてください', {error:true}); return; }
-        saveDraft(); startInfo.textContent = `出発地: ${state.startLabel||state.startAddress} (座標OK)`; toast('出発地を設定しました');
+        saveDraft(); startInfo.textContent = `出発地: ${state.startLabel||state.startAddress} (座標OK)`;
+        if (state.plan && state.plan.days){ toast('出発地を設定しました。行程を計算し直しています…'); try { await computeAll(); } catch(e){ console.warn(e); } renderPlan(); toast('行程を計算し直しました'); }
+        else toast('出発地を設定しました');
       }
       const aiBox = h('textarea',{placeholder:'ここに日本語で注文を書く', rows:3});
       const aiMsg = h('span',{class:'small muted'});
@@ -535,7 +537,9 @@
               p.days.forEach((d, di)=>{
                 const it = p.itins[d.date]; const col = dayColor(di);
                 if (!d.stops.some(hasCoord)) return; // 訪問のない日は線を引かない
-                if (it && it.geometry && it.geometry.length > 1){ m.line(it.geometry, { color:col, weight:4, opacity:.75, dashed: !!it.estimated }); }
+                const g0 = it && it.geometry && it.geometry.length > 1 ? it.geometry[0] : null;
+                const stale = !start || !g0 || Geo.haversineKm(start, {lat:g0[0], lng:g0[1]}) > 50; // 出発地なし/変更前に計算した経路線は使わない
+                if (!stale){ m.line(it.geometry, { color:col, weight:4, opacity:.75, dashed: !!it.estimated }); }
                 else { const line = [start, ...d.stops.filter(hasCoord), ...(state.roundTrip?[start]:[])].filter(q=>q && hasCoord(q)).map(q=>[Number(q.lat),Number(q.lng)]); if (line.length > 1) m.line(line, { color:col, weight:3, opacity:.6, dashed:true }); }
                 d.stops.forEach((st, i)=>{ if (!hasCoord(st)) return; const row = it?.rows?.[i];
                   m.marker(st, { text:i+1, color:col, popup: h('div',null, h('b',null, st.label||''), st.name ? h('div',{class:'small'}, st.name) : null, h('div',{class:'small muted'}, `${di+1}日目 ${UI.fmtDate(d.date)}${row ? ' ' + fmtT(row.arr) + ' 着' : ''}`), h('div',{class:'small muted'}, st.address||''), placeLinks(st)) });
@@ -543,6 +547,7 @@
               });
               m.invalidate();
               m.fit(pts);
+              if (!start) legend.appendChild(h('div',{class:'text-danger', style:{width:'100%'}}, '⚠ 出発地が未設定のため経路線は表示していません。「2. 計画の条件」で出発地を設定すると行程を計算し直します。'));
             } catch(e){ console.warn('plan map failed', e); legend.textContent = '地図の表示に失敗しました: ' + (e.message||e); }
           }, 60);
         }
