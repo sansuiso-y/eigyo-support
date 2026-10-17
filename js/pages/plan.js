@@ -228,6 +228,8 @@
       };
       state.rows = (state.rows||[]).map(r=>Object.assign(emptyRow(), r));
       function saveDraft(){ const o = Object.assign({}, state); delete o.filterOptions; Store.save('plans', o); state.id = o.id; }
+      // 出発地の座標。未設定なら null(Number(null) が 0 になって (0,0)=ギニア湾 を出発地にしてしまう事故を防ぐ)
+      const startPt = () => (isNum(state.startLat) && isNum(state.startLng)) ? { lat:Number(state.startLat), lng:Number(state.startLng) } : null;
 
       /* ===== 1. 訪問先リスト ===== */
       const listEl = h('div');
@@ -417,8 +419,8 @@
         finally { aiBtn.disabled=false; }
       }}, '🤖 注文を反映');
       const buildBtn = h('button',{class:'btn primary', onClick: async()=>{
-        const start = { lat:Number(state.startLat), lng:Number(state.startLng) };
-        if (!hasCoord(start)){ toast('先に出発地を設定してください(設定の拠点住所、または上の欄)', {error:true}); return; }
+        const start = startPt();
+        if (!start){ toast('先に出発地を設定してください(設定の拠点住所、または上の欄)', {error:true}); return; }
         if (!/^\d{4}-\d{2}-\d{2}$/.test(state.startDate||'')){ toast('開始日を入力してください', {error:true}); return; }
         state.days = Math.min(30, Math.max(1, Math.floor(Number(state.days))||1)); daysInp.value = state.days;
         const sel = state.rows.filter(r=>r.checked);
@@ -443,16 +445,16 @@
       /* ===== 3. 日ごとの計画 ===== */
       const planEl = h('div');
       async function computeAll(){
-        const start = { lat:Number(state.startLat), lng:Number(state.startLng) };
+        const start = startPt(); if (!start){ toast('出発地の座標が未設定です。「2. 計画の条件」で出発地を設定してください', {error:true}); return; }
         for (const day of state.plan.days){ state.plan.itins[day.date] = await itinerary(start, day, state); }
         saveDraft();
       }
-      async function recompute(day){ const start = { lat:Number(state.startLat), lng:Number(state.startLng) }; state.plan.itins[day.date] = await itinerary(start, day, state); saveDraft(); renderPlan(); }
+      async function recompute(day){ const start = startPt(); if (!start){ toast('出発地の座標が未設定です', {error:true}); return; } state.plan.itins[day.date] = await itinerary(start, day, state); saveDraft(); renderPlan(); }
       /* その日の行程を地図アプリで開く。日本なら Googleマップ、韓国なら NAVER マップ(Google は韓国で車ルート案内が制限されるため)。
          NAVER はアプリの URL スキーム(経由地は5か所まで、スマホにアプリが必要)。PC では出発地→最終目的地のウェブ版リンク */
       const inKorea = p => Number(p.lat) >= 33 && Number(p.lat) <= 39 && Number(p.lng) >= 124 && Number(p.lng) <= 132;
       const isMobile = /iPhone|iPad|Android/i.test(navigator.userAgent);
-      function dayPoints(day){ const st = { lat:Number(state.startLat), lng:Number(state.startLng), label: state.startLabel||'出発地' }; return [st, ...day.stops.filter(hasCoord).map(s=>({lat:Number(s.lat), lng:Number(s.lng), label:s.label||s.name||''})), ...(state.roundTrip?[st]:[])].filter(hasCoord); }
+      function dayPoints(day){ const sp = startPt(); if (!sp) return []; const st = Object.assign({ label: state.startLabel||'出発地' }, sp); return [st, ...day.stops.filter(hasCoord).map(s=>({lat:Number(s.lat), lng:Number(s.lng), label:s.label||s.name||''})), ...(state.roundTrip?[st]:[])].filter(hasCoord); }
       function naverLinks(pts){
         const app = 'appname=' + encodeURIComponent(location.origin || 'eigyo-support');
         const links = [];
@@ -513,7 +515,7 @@
             (day.warnings||[]).length ? h('div',{class:'notice text-danger small'}, day.warnings.map(w=>h('div',null,'⚠ '+w))) : null,
             day.stops.length ? list : h('div',{class:'small muted'}, 'この日は訪問なし'),
             h('div',{class:'row mt'},
-              h('button',{class:'btn sm', onClick: async()=>{ const start={lat:Number(state.startLat),lng:Number(state.startLng)}; try { const r = await Geo.optimize(start, day.stops, {roundTrip:state.roundTrip}); day.stops = r.stops; await recompute(day); toast('並べ直しました'); } catch(e){ toast(e.message,{error:true}); } }}, '✨ この日を最適化'),
+              h('button',{class:'btn sm', onClick: async()=>{ const start = startPt(); if (!start){ toast('出発地の座標が未設定です', {error:true}); return; } try { const r = await Geo.optimize(start, day.stops, {roundTrip:state.roundTrip}); day.stops = r.stops; await recompute(day); toast('並べ直しました'); } catch(e){ toast(e.message,{error:true}); } }}, '✨ この日を最適化'),
               ...navButtons(day),
               h('a',{class:'btn sm', href:`#/route?date=${day.date}`}, '🚗 ルート画面(反映後)'))
           ));
@@ -528,13 +530,13 @@
               const map = L.map(mapEl, {scrollWheelZoom:false});
               L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {attribution:'&copy; OpenStreetMap contributors', maxZoom:19}).addTo(map);
               const pts = [];
-              const start = { lat:Number(state.startLat), lng:Number(state.startLng) };
-              if (hasCoord(start)){ L.marker([start.lat, start.lng], {icon: L.divIcon({className:'num-marker start', html:'S', iconSize:[26,26], iconAnchor:[13,13], popupAnchor:[0,-12]})}).addTo(map).bindPopup(h('div',null, h('b',null, state.startLabel||'出発地'), h('div',{class:'small muted'}, state.startAddress||''))); pts.push([start.lat, start.lng]); }
+              const start = startPt();
+              if (start){ L.marker([start.lat, start.lng], {icon: L.divIcon({className:'num-marker start', html:'S', iconSize:[26,26], iconAnchor:[13,13], popupAnchor:[0,-12]})}).addTo(map).bindPopup(h('div',null, h('b',null, state.startLabel||'出発地'), h('div',{class:'small muted'}, state.startAddress||''))); pts.push([start.lat, start.lng]); }
               p.days.forEach((d, di)=>{
                 const it = p.itins[d.date]; const col = dayColor(di);
                 if (!d.stops.some(hasCoord)) return; // 訪問のない日は線を引かない
                 if (it && it.geometry && it.geometry.length > 1){ L.polyline(it.geometry, {color:col, weight:4, opacity:.75, dashArray: it.estimated ? '8 8' : null}).addTo(map); }
-                else { const line = [start, ...d.stops.filter(hasCoord), ...(state.roundTrip?[start]:[])].filter(hasCoord).map(q=>[Number(q.lat),Number(q.lng)]); if (line.length > 1) L.polyline(line, {color:col, weight:3, opacity:.6, dashArray:'8 8'}).addTo(map); }
+                else { const line = [start, ...d.stops.filter(hasCoord), ...(state.roundTrip?[start]:[])].filter(q=>q && hasCoord(q)).map(q=>[Number(q.lat),Number(q.lng)]); if (line.length > 1) L.polyline(line, {color:col, weight:3, opacity:.6, dashArray:'8 8'}).addTo(map); }
                 d.stops.forEach((st, i)=>{ if (!hasCoord(st)) return; const row = it?.rows?.[i];
                   L.marker([Number(st.lat), Number(st.lng)], {icon: L.divIcon({className:'num-marker', html:`<span style="background:${col}">${i+1}</span>`, iconSize:[26,26], iconAnchor:[13,13], popupAnchor:[0,-12]})}).addTo(map)
                     .bindPopup(h('div',null, h('b',null, st.label||''), st.name ? h('div',{class:'small'}, st.name) : null, h('div',{class:'small muted'}, `${di+1}日目 ${UI.fmtDate(d.date)}${row ? ' ' + fmtT(row.arr) + ' 着' : ''}`), h('div',{class:'small muted'}, st.address||''), placeLinks(st)));
@@ -562,6 +564,7 @@
         return p.days.map((d,i)=>{ const it = p.itins[d.date]; return `■${i+1}日目 ${UI.fmtDateLong(d.date)}\n` + d.stops.map((s,j)=>{ const r = it?.rows?.[j]; return `${j+1}. ${r?fmtT(r.arr)+'-'+fmtT(r.dep)+' ':''}${s.label}${s.name?' / '+s.name:''}${s.address?' ('+s.address+')':''}`; }).join('\n') + (it?`\n  合計 ${it.distanceKm.toFixed(1)}km / 移動 ${UI.fmtMin(it.durationMin)}`:''); }).join('\n\n');
       }
       async function applyPlan(){
+        if (!startPt()){ toast('出発地の座標が未設定です。「2. 計画の条件」で出発地を設定してから反映してください', {error:true}); return; }
         const p = state.plan; if (!p) return;
         const total = p.days.reduce((a,d)=>a+d.stops.length,0);
         const existing = p.days.flatMap(d=>Store.where('events', e=>e.date===d.date && e.type==='visit'));
@@ -587,7 +590,7 @@
             ev++;
           });
           if (!day.stops.length) continue;
-          Store.save('routes', { planId, date: day.date, name:`営業計画 ${UI.fmtDate(day.date)}`, startLabel: state.startLabel||'出発地', startAddress: state.startAddress, startLat: Number(state.startLat), startLng: Number(state.startLng), roundTrip: state.roundTrip, departTime: state.workStart,
+          Store.save('routes', { planId, date: day.date, name:`営業計画 ${UI.fmtDate(day.date)}`, startLabel: state.startLabel||'出発地', startAddress: state.startAddress, startLat: (startPt()||{}).lat ?? null, startLng: (startPt()||{}).lng ?? null, roundTrip: state.roundTrip, departTime: state.workStart,
             stops: day.stops.map(s=>({ customerId:s.customerId||'', label:s.label, address:s.address, lat:s.lat, lng:s.lng, stayMin:stay(s) })), distanceKm: Math.round((it?.distanceKm||0)*10)/10, durationMin: Math.round(it?.durationMin||0) });
         }
         saveDraft();
@@ -631,7 +634,7 @@
             L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {attribution:'&copy; OpenStreetMap contributors', maxZoom:19}).addTo(map);
             const pts = [];
             const mk = (p, text, cls, popup) => { const m = L.marker([Number(p.lat), Number(p.lng)], {icon: L.divIcon({className:'num-marker'+(cls?' '+cls:''), html:String(text), iconSize:[26,26], iconAnchor:[13,13], popupAnchor:[0,-12]})}).addTo(map); m.bindPopup(popup); pts.push([Number(p.lat), Number(p.lng)]); return m; };
-            if (Number.isFinite(Number(state.startLat)) && Number.isFinite(Number(state.startLng)) && state.startLat !== null && state.startLat !== '') mk({lat:state.startLat, lng:state.startLng}, 'S', 'start', h('div',null, h('b',null, state.startLabel||'出発地'), h('div',{class:'small muted'}, state.startAddress||'')));
+            if (startPt()) mk(startPt(), 'S', 'start', h('div',null, h('b',null, state.startLabel||'出発地'), h('div',{class:'small muted'}, state.startAddress||'')));
             let focusMarker = null;
             withPos.forEach(r=>{ const i = list.indexOf(r)+1; const m = mk(r, i, r===focus?'start':'', h('div',null, h('b',null, r.company||''), r.name ? h('div',{class:'small'}, r.name) : null, h('div',{class:'small muted'}, r.address||''), r.geoNote ? h('div',{class:'small text-warn'}, '⚠ 要確認: '+r.geoNote) : null, placeLinks(r))); if (r===focus) focusMarker = m; });
             map.invalidateSize();
@@ -717,7 +720,7 @@
         h('h2',{class:'mt'}, '3. 日ごとの計画'), planEl
       );
       renderList(); renderPlan();
-      if (state.plan && state.plan.days && (!state.plan.itins || !Object.keys(state.plan.itins).length) && Number.isFinite(Number(state.startLat))){ computeAll().then(renderPlan).catch(e=>console.warn('recompute failed', e)); } // 保存した計画を開いた直後(行程は保存せず計算し直す)
+      if (state.plan && state.plan.days && (!state.plan.itins || !Object.keys(state.plan.itins).length) && startPt()){ computeAll().then(renderPlan).catch(e=>console.warn('recompute failed', e)); } // 保存した計画を開いた直後(行程は保存せず計算し直す)
       if (params.customer){ const c = Store.get('customers', params.customer); if (c && !state.rows.some(r=>r.customerId===c.id)){ state.rows.push(Object.assign(emptyRow(), {company:c.company||'', name:c.name||'', title:c.title||'', phone:c.phone||'', address:c.address||'', lat:c.lat, lng:c.lng, customerId:c.id})); saveDraft(); renderList(); } }
       return { destroy: ()=>offSaved() }; // 画面を離れたら購読を外す
     }
