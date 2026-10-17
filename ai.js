@@ -11,12 +11,17 @@ const BASE = 'https://generativelanguage.googleapis.com/v1beta';
 const MODELS = (process.env.GEMINI_MODELS || 'gemini-3.5-flash,gemini-2.5-flash').split(',').map(s=>s.trim()).filter(Boolean);
 const MAX_FILE = 25 * 1024 * 1024;
 
+/* 画像パート。名刺や名簿は細かい文字が多いので最高解像度(ultra_high、画像あたり約2,200トークン ≒ 通常の2倍)で渡す。
+   mediaResolution は Gemini 3 以降のパートごとの指定で、2.x 系には付けない(gemini() 側で外す) */
+function imagePart(mimeType, buffer){ const p = { inlineData:{ mimeType, data: buffer.toString('base64') } }; if (mimeType.startsWith('image/')) p.mediaResolution = { level:'MEDIA_RESOLUTION_ULTRA_HIGH' }; return p; }
+
 async function gemini({ parts, system, schema, tools }){
   const key = process.env.GEMINI_API_KEY;
   if (!key){ const e = new Error('AI機能はクラウド版でのみ使えます(GEMINI_API_KEY 未設定)'); e.status = 503; throw e; }
   let lastErr = null;
   for (const model of MODELS) for (let attempt = 0; attempt < 2; attempt++){ // 応答が途中で切れた/解釈できないときは同じモデルでもう1回、だめなら次のモデルへ
-    const body = { contents:[{ role:'user', parts }], generationConfig:{ maxOutputTokens: 16000, temperature: 0.1, responseMimeType:'application/json', ...(schema ? { responseSchema: schema } : {}) } };
+    const modelParts = /^gemini-[12]\./.test(model) ? parts.map(p => { const { mediaResolution, ...rest } = p; return rest; }) : parts;
+    const body = { contents:[{ role:'user', parts: modelParts }], generationConfig:{ maxOutputTokens: 16000, temperature: 0.1, responseMimeType:'application/json', ...(schema ? { responseSchema: schema } : {}) } };
     if (system) body.systemInstruction = { parts:[{ text: system }] };
     if (tools){ body.tools = tools; delete body.generationConfig.responseMimeType; delete body.generationConfig.responseSchema; } // 検索ツール併用時はJSONモード不可
     const ctl = new AbortController(); const timer = setTimeout(()=>ctl.abort(), 90000);
@@ -59,6 +64,24 @@ const ROW_SCHEMA = { type:'OBJECT', properties:{ rows:{ type:'ARRAY', items:{ ty
   company:{type:'STRING'}, name:{type:'STRING'}, title:{type:'STRING'}, category:{type:'STRING'}, phone:{type:'STRING'}, address:{type:'STRING'}, memo:{type:'STRING'} } } },
   total:{type:'INTEGER', description:'資料に載っている人(行)の総数'}, note:{type:'STRING'} }, required:['rows','total'] };
 
+/* AIが途中で読むのをやめて一部しか返さないことがある → 自己申告の総数(total)と件数を比べ、足りなければ最大3回まで取り直して一番多いものを使う。
+   取り直しは開始から90秒以内に始められるときだけ(Cloud Run の 300 秒上限を超えないように)。2回目以降で失敗しても、それまでの結果は返す */
+async function readAll(call, key, label){
+  const t0 = Date.now(); let best = null, total = 0;
+  for (let i = 0; i < 3; i++){
+    let out;
+    try { out = await call(); }
+    catch(e){ if (best){ console.error(`[ai] ${label}: retry failed, keeping`, best[key].length, ':', e.message); break; } throw e; }
+    total = Math.max(total, out.total);
+    if (!best || out[key].length > best[key].length) best = out;
+    if (best[key].length >= total) break;
+    if (i === 2 || Date.now() - t0 > 90000){ console.error(`[ai] ${label}:`, out[key].length, '< total', total, '→ giving up'); break; }
+    console.error(`[ai] ${label}:`, out[key].length, '< total', total, '→ retry', i+1, `(${Math.round((Date.now()-t0)/1000)}s)`);
+  }
+  best.total = total;
+  return best;
+}
+
 async function extract(buffer, mime, fileName){
   if (!buffer || !buffer.length){ const e = new Error('ファイルが空です'); e.status=400; throw e; }
   if (buffer.length > MAX_FILE){ const e = new Error('ファイルが大きすぎます(25MBまで)'); e.status=413; throw e; }
@@ -72,24 +95,11 @@ async function extract(buffer, mime, fileName){
 - パスポート番号・生年月日・性別・部屋番号・個人のメールアドレスは読み取らず、どの項目にも入れない。
 - 同じ会社の人が複数いても、それぞれ1行にする。
 - 読み取れない項目は空文字にする。表以外の説明文は rows に含めない。note に、読み取りで気になった点(かすれ・不明瞭など)を日本語で短く書く(なければ空)。`;
-  const parts = [ { inlineData:{ mimeType, data: buffer.toString('base64') } }, { text:'この資料の一覧を読み取って、全員を rows の配列にしてください。' } ];
+  const parts = [ imagePart(mimeType, buffer), { text:'この資料の一覧を読み取って、全員を rows の配列にしてください。' } ];
   const clean = out => ({ rows: (Array.isArray(out.rows) ? out.rows : []).filter(r=>r && typeof r === 'object').map(r=>({
       company: str(r.company).slice(0,200), name: str(r.name).slice(0,200), title: str(r.title).slice(0,200), category: str(r.category).slice(0,50), phone: str(r.phone).slice(0,60), address: str(r.address).slice(0,300), memo: str(r.memo).slice(0,500)
-    })).filter(r=>r.company || r.name), total: Math.max(0, Math.floor(Number(out.total)) || 0), note: str(out.note) });
-  // AIが途中で読むのをやめて数行しか返さないことがある → 自己申告の総数(total)と行数を比べ、足りなければ最大3回まで取り直して一番多いものを使う
-  // 取り直しは、開始から90秒以内に始められるときだけ(Cloud Run の 300 秒上限を超えないように)。2回目以降で失敗しても、それまでの結果は返す
-  const t0 = Date.now(); let best = null, total = 0;
-  for (let i = 0; i < 3; i++){
-    let out;
-    try { out = clean(await gemini({ parts, system, schema: ROW_SCHEMA })); }
-    catch(e){ if (best){ console.error('[ai] extract: retry failed, keeping', best.rows.length, 'rows:', e.message); break; } throw e; }
-    total = Math.max(total, out.total);
-    if (!best || out.rows.length > best.rows.length) best = out;
-    if (best.rows.length >= total) break;
-    console.error('[ai] extract: rows', out.rows.length, '< total', total, '→ retry', i+1, `(${Math.round((Date.now()-t0)/1000)}s)`);
-    if (Date.now() - t0 > 90000) break;
-  }
-  best.total = total;
+    })).filter(r=>r.company || r.name), total: Math.min(1000, Math.max(0, Math.floor(Number(out.total)) || 0)), note: str(out.note) });
+  const best = await readAll(async()=>clean(await gemini({ parts, system, schema: ROW_SCHEMA })), 'rows', 'extract');
   const short = best.total > best.rows.length;
   return { rows: best.rows, total: best.total, note: short ? `資料には約${best.total}件ありますが${best.rows.length}件しか読み取れませんでした。写真を撮り直すか、ページを分けて取り込んでください。` + (best.note ? ' ' + best.note : '') : best.note };
 }
@@ -98,7 +108,8 @@ async function extract(buffer, mime, fileName){
 const CARD_SCHEMA = { type:'OBJECT', properties:{ cards:{ type:'ARRAY', items:{ type:'OBJECT', properties:{
   company:{type:'STRING'}, department:{type:'STRING'}, name:{type:'STRING'}, nameKana:{type:'STRING'}, title:{type:'STRING'}, phone:{type:'STRING'}, mobile:{type:'STRING'}, fax:{type:'STRING'},
   email:{type:'STRING'}, zip:{type:'STRING'}, address:{type:'STRING'}, website:{type:'STRING'}, memo:{type:'STRING'},
-  box_2d:{ type:'ARRAY', items:{type:'INTEGER'}, description:'名刺の位置 [ymin, xmin, ymax, xmax](画像全体を0〜1000とした正規化座標)' } } } }, note:{type:'STRING'} }, required:['cards'] };
+  box_2d:{ type:'ARRAY', items:{type:'INTEGER'}, description:'名刺の位置 [ymin, xmin, ymax, xmax](画像全体を0〜1000とした正規化座標)' } } } },
+  total:{type:'INTEGER', description:'写真に写っている名刺の枚数'}, note:{type:'STRING'} }, required:['cards','total'] };
 
 /* 名刺画像 → 顧客の項目。1枚の写真に複数の名刺が写っていれば複数返す */
 async function cards(buffer, mime, fileName){
@@ -109,20 +120,23 @@ async function cards(buffer, mime, fileName){
   if (!mimeType || mimeType==='application/octet-stream'){ mimeType = ({jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',webp:'image/webp',heic:'image/heic',heif:'image/heif',pdf:'application/pdf',gif:'image/gif'})[ext] || 'image/jpeg'; }
   const system = `あなたは営業アシスタントです。名刺の写真を読み取り、顧客台帳の項目としてJSONにします。
 ルール:
-- 写真に写っている名刺1枚につき cards の1要素。複数枚写っていれば複数。名刺が写っていなければ cards は空。
+- まず写真に写っている名刺の枚数を数えて total に入れる(机に並べた数枚〜十数枚の写真もある)。名刺1枚につき cards の1要素を、total と同じ数だけ省略せずに返す。名刺が写っていなければ cards は空、total は 0。
+- 写真全体を1枚の名刺として扱わない。カード1枚ごとに box_2d を付ける。
 - company(会社名。「株式会社」などの法人格は名刺の表記どおり)、department(部署)、name(氏名。名刺の表記どおり。姓と名の間は半角スペース1つ)、nameKana(ふりがな/ローマ字があれば)、title(役職)、phone(代表/直通の固定電話)、mobile(携帯)、fax、email、zip(郵便番号 123-4567 形式)、address(住所。郵便番号は含めない。ビル名・階まで)、website、memo(名刺にあるその他の情報: 支店名・資格・SNS など短く)。
-- 読めない項目は空文字。推測で埋めない。裏面(英語面)しか無い場合は英語表記のまま入れる。
+- 読めない項目は空文字。推測で埋めない。裏面(英語面)しか無い場合は英語表記のまま入れる。韓国語・英語の名刺は原文の表記のまま(翻訳しない)。
+- zip には郵便番号だけ(数字とハイフン)。号室・ビル名は address に入れる。各項目にそれ以外の説明や注記を書かない。
 - 電話番号は 03-1234-5678 / 090-1234-5678 のようにハイフン区切りに整える。
 - box_2d: その名刺が写っている範囲を [ymin, xmin, ymax, xmax] の4整数で返す(画像の上端=0・下端=1000、左端=0・右端=1000 の正規化座標)。名刺の四隅がぴったり収まる範囲。
 - note: 読み取りで気になった点(ピンぼけ・切れている など)を日本語で短く(なければ空)。`;
-  const parts = [ { inlineData:{ mimeType, data: buffer.toString('base64') } }, { text:'この写真の名刺を読み取って cards にしてください。各名刺の box_2d も必ず返してください。' } ];
-  const out = await gemini({ parts, system, schema: CARD_SCHEMA });
-  const list = (Array.isArray(out.cards) ? out.cards : []).map(c=>({
-    company:str(c.company), department:str(c.department), name:str(c.name), nameKana:str(c.nameKana), title:str(c.title), phone:str(c.phone), mobile:str(c.mobile), fax:str(c.fax),
-    email:str(c.email), zip:str(c.zip), address:str(c.address), website:str(c.website), memo:str(c.memo),
-    box: Array.isArray(c.box_2d) && c.box_2d.length === 4 && c.box_2d.every(n=>Number.isFinite(Number(n))) ? c.box_2d.map(n=>Math.max(0, Math.min(1000, Math.round(Number(n))))) : null
-  })).filter(c=>c.company || c.name);
-  return { cards: list, note: str(out.note) };
+  const parts = [ imagePart(mimeType, buffer), { text:'この写真に写っている名刺をすべて読み取って cards にしてください(枚数は total に)。各名刺の box_2d も必ず返してください。' } ];
+  const clean = out => ({ cards: (Array.isArray(out.cards) ? out.cards : []).filter(c=>c && typeof c === 'object').map(c=>({
+      company:str(c.company).slice(0,200), department:str(c.department).slice(0,200), name:str(c.name).slice(0,100), nameKana:str(c.nameKana).slice(0,100), title:str(c.title).slice(0,100), phone:str(c.phone).slice(0,60), mobile:str(c.mobile).slice(0,60), fax:str(c.fax).slice(0,60),
+      email:str(c.email).slice(0,200), zip:str(c.zip).slice(0,20), address:str(c.address).slice(0,300), website:str(c.website).slice(0,200), memo:str(c.memo).slice(0,500),
+      box: Array.isArray(c.box_2d) && c.box_2d.length === 4 && c.box_2d.every(n=>Number.isFinite(Number(n))) ? c.box_2d.map(n=>Math.max(0, Math.min(1000, Math.round(Number(n))))) : null
+    })).filter(c=>c.company || c.name), total: Math.min(1000, Math.max(0, Math.floor(Number(out.total)) || 0)), note: str(out.note) });
+  const best = await readAll(async()=>clean(await gemini({ parts, system, schema: CARD_SCHEMA })), 'cards', 'cards');
+  const short = best.total > best.cards.length;
+  return { cards: best.cards, total: best.total, note: short ? `写真には${best.total}枚ありそうですが${best.cards.length}枚しか読み取れませんでした。名刺を2〜4枚ずつに分けて撮り直すと読みやすくなります。` + (best.note ? ' ' + best.note : '') : best.note };
 }
 
 const ASSIST_SCHEMA = { type:'OBJECT', properties:{
