@@ -34,6 +34,7 @@
     if (current && current.destroy) { try{ current.destroy(); }catch(e){} }
     renderNav(pages[name] ? name : 'dashboard');
     const root = document.getElementById('content');
+    root.dataset.page = pages[name] ? name : 'dashboard'; // CSS で画面ごとの幅などを変えるため
     UI.clear(root);
     UI.clear(document.getElementById('modal-root')); document.body.style.overflow='';
     document.title = (page.title||'') + ' | 営業サポート';

@@ -40,6 +40,7 @@ p{margin:0 0 .75em}
 .sidenav .ico{width:1.4em;text-align:center}
 
 .content{padding:calc(var(--topbar-h) + 16px) 16px 32px;margin-left:var(--nav-w);max-width:1200px}
+.content[data-page="plan"]{max-width:none} /* 営業計画は表の列が多いので画面の右端まで使う */
 .tabbar{display:none}
 
 @media (max-width: 900px){
@@ -125,7 +126,9 @@ textarea{min-height:90px;resize:vertical}
 table.tbl{width:100%;border-collapse:collapse;font-size:.9rem}
 table.tbl th,table.tbl td{padding:8px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
 table.tbl th{color:var(--muted);font-weight:600;font-size:.8rem}
-.tbl-wrap{overflow-x:auto}
+.tbl-wrap{overflow-x:auto;scrollbar-width:thin}
+.tbl-wrap::-webkit-scrollbar{height:10px}
+.tbl-wrap::-webkit-scrollbar-thumb{background:var(--border);border-radius:5px} /* Mac でも横スクロールがあると分かるように常時表示 */
 
 /* calendar */
 .cal-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
