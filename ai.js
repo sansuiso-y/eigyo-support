@@ -4,6 +4,7 @@
  *   POST /api/assist   … 「どこをいつ回りたいか」の日本語の注文を、行ごとの希望日・時間帯に変換する
  *   POST /api/lookup   … 会社名から所在地を Google 検索付きで調べる(要確認として扱う)
  *   POST /api/cards    … 名刺の写真(1枚に複数枚写っていてもよい)を読み取り、顧客の項目にする
+ *   POST /api/hotels   … 各日の訪問内容から、泊まるのにおすすめのホテルを Google 検索付きで提案する
  * 環境変数 GEMINI_API_KEY が必要(他の社内アプリと共用)。未設定なら 503 を返す。
  */
 'use strict';
@@ -141,7 +142,8 @@ async function cards(buffer, mime, fileName){
 
 const ASSIST_SCHEMA = { type:'OBJECT', properties:{
   updates:{ type:'ARRAY', items:{ type:'OBJECT', properties:{ key:{type:'STRING'}, date:{type:'STRING'}, timeFrom:{type:'STRING'}, timeTo:{type:'STRING'}, checked:{type:'BOOLEAN'}, stayMin:{type:'INTEGER'}, reason:{type:'STRING'} }, required:['key'] } },
-  days:{type:'INTEGER'}, startDate:{type:'STRING'}, message:{type:'STRING'} }, required:['updates','message'] };
+  dayPlans:{ type:'ARRAY', items:{ type:'OBJECT', properties:{ date:{type:'STRING'}, travelOnly:{type:'BOOLEAN'}, startPlace:{type:'STRING'}, endPlace:{type:'STRING'}, startTime:{type:'STRING'}, memo:{type:'STRING'} }, required:['date'] } },
+  days:{type:'INTEGER'}, startDate:{type:'STRING'}, maxPerDay:{type:'INTEGER'}, message:{type:'STRING'} }, required:['updates','dayPlans','message'] };
 
 async function assist(input){
   const rows = Array.isArray(input.rows) ? input.rows.slice(0,300) : [];
@@ -154,10 +156,20 @@ async function assist(input){
 返し方:
 - updates: 変更が必要な行だけ。key は必ずリストの key をそのまま使う。date は YYYY-MM-DD(「2日目」「最終日」は上の対応表で日付に直す。指定がなければ省略)。timeFrom/timeTo は HH:MM(「午前」=09:00〜12:00、「午後」=13:00〜17:00、「15時以降」= timeFrom 15:00、「夕方」=16:00〜18:00 を目安)。checked は「回らない/除外」なら false、「必ず回る/これだけ回る」なら該当行 true・それ以外 false。stayMin は滞在時間の指定があるときだけ(分)。
 - 会社名は表記ゆれ(漢字/ハングル/ローマ字、株式会社の有無、スペース)を考慮して対応づける。区分やエリア(「清州市内」「旅行会社だけ」など)への指示は、該当する全行に反映する。
-- 期間の変更指示(「4日間にして」「10/20から」)があれば days / startDate を返す。
+- 期間の変更指示(「4日間にして」「10/20から」)があれば days / startDate を返す。「1日3件まで」のような1日の訪問数の上限は maxPerDay。
+- 移動の日程(飛行機・電車・宿泊ホテル・出発地)の指示は dayPlans に、該当する日付ごとに1要素で返す:
+  - travelOnly: その日が移動だけで訪問しない日(渡航日・帰国日・都市間の移動日)なら true。
+  - startPlace: その日の車での出発地(ホテル名・駅名・空港名など、原文の表記のまま)。endPlace: その日の帰着地・宿泊先。指示にある名前だけを書き、推測で埋めない。
+  - 「○○に泊まる」「ホテルはそこ」のように、ある日から同じ宿に連泊する指示は、その宿に泊まる各日の endPlace に同じ名前を入れる(翌日の出発地は自動で前日の宿になるので startPlace は不要)。
+  - 渡航日(例: 山水荘→羽田→仁川空港→청주역)は travelOnly=true、endPlace=到着後に向かう場所や宿(例: 청주역)、memo に経路全体を書く。帰国日(例: 仁川空港→羽田→山水荘)は travelOnly=true、memo に経路、endPlace は空でよい。
+  - 到着日の午後から訪問する場合など、その日の活動開始時刻が分かれば startTime(HH:MM)。
+  - memo: その日の補足(便名・経路・注意)を短く。
 - message: 何をどう反映したかを日本語で1〜2文。対応づけできなかった名前があればここに書く。`;
   const list = rows.map(r=>`key=${str(r.key)} | 会社=${str(r.company)} | 氏名=${str(r.name)} | 区分=${str(r.category)} | 住所=${str(r.address)} | 選択=${r.checked?'有':'無'} | 希望日=${str(r.date)} | 時間=${str(r.timeFrom)}〜${str(r.timeTo)}`).join('\n');
-  const out = await gemini({ parts:[{ text:`【訪問先リスト】\n${list}\n\n【注文】\n${instruction}` }], system, schema: ASSIST_SCHEMA });
+  const wantsDays = /ホテル|宿|泊|空港|羽田|成田|仁川|金浦|移動日|帰国|渡航|到着|フライト|飛行機|チェックイン|チェックアウト/.test(instruction);   // 移動・宿の指示が含まれていそうか
+  const ask = ()=>gemini({ parts:[{ text:`【訪問先リスト】\n${list}\n\n【注文】\n${instruction}${wantsDays ? '\n\n(注文に移動・宿泊・到着/出発の指示が含まれています。該当する日付ごとに dayPlans を必ず返してください)' : ''}` }], system, schema: ASSIST_SCHEMA });
+  let out = await ask();
+  if (wantsDays && !(Array.isArray(out.dayPlans) && out.dayPlans.length)){ console.error('[ai] assist: dayPlans empty → retry'); const out2 = await ask(); if (Array.isArray(out2.dayPlans) && out2.dayPlans.length) out = out2; }   // 空で返る揺れがあるので1回取り直す
   const keys = new Set(rows.map(r=>str(r.key)));
   const updates = (Array.isArray(out.updates)?out.updates:[]).filter(u=>u && keys.has(str(u.key))).map(u=>{
     const o = { key: str(u.key) };
@@ -172,7 +184,31 @@ async function assist(input){
   const res = { updates, message: str(out.message) };
   if (Math.floor(Number(out.days)) > 0) res.days = Math.min(60, Math.floor(Number(out.days)));
   if (/^\d{4}-\d{2}-\d{2}$/.test(str(out.startDate))) res.startDate = out.startDate;
+  if (Math.floor(Number(out.maxPerDay)) > 0) res.maxPerDay = Math.min(30, Math.floor(Number(out.maxPerDay)));
+  res.dayPlans = (Array.isArray(out.dayPlans) ? out.dayPlans : []).filter(d=>d && /^\d{4}-\d{2}-\d{2}$/.test(str(d.date))).map(d=>({
+    date: str(d.date), travelOnly: typeof d.travelOnly === 'boolean' ? d.travelOnly : undefined,
+    startPlace: str(d.startPlace).slice(0,120), endPlace: str(d.endPlace).slice(0,120), startTime: hhmm(d.startTime), memo: str(d.memo).slice(0,300) }));
   return res;
+}
+
+/* おすすめの宿: 各日の最終訪問先・翌日の最初の訪問先の近くで、出張者向けのホテルを Google 検索付きで提案する(結果は候補。予約はしない) */
+async function hotels(input){
+  const days = (Array.isArray(input.days) ? input.days : []).slice(0, 14).map(d=>({ date:str(d.date), lastArea:str(d.lastArea).slice(0,200), nextArea:str(d.nextArea).slice(0,200), lastStops:str(d.lastStops).slice(0,300), fixed:str(d.fixed).slice(0,120) })).filter(d=>d.date);
+  if (!days.length){ const e = new Error('対象の日がありません'); e.status=400; throw e; }
+  const prefs = str(input.prefs).slice(0, 500);
+  const system = `あなたは出張手配のアシスタントです。各日の訪問内容から、その夜に泊まるのに適したホテルをWeb検索で調べ、JSONだけを出力します(前置き・説明・コードブロック記号は不要)。
+出力形式: {"days":[{"date":"YYYY-MM-DD","hotels":[{"name":"ホテル名(現地表記。韓国なら韓国語名も併記)","address":"住所(現地表記)","area":"エリア(駅名など)","priceHint":"1泊の目安(分かれば)","reason":"おすすめ理由(訪問先・翌日の出発地との位置関係、駐車場、朝食など)を日本語で1〜2文"}],"note":"補足"}],"note":"全体の補足"}
+ルール:
+- 1日につき2〜3件。その日の最終訪問先の近く、または翌日の最初の訪問先の近くで、車で回る出張者に向くビジネスホテル〜中級ホテルを優先。駐車場の有無が分かれば reason に書く。
+- 「宿が決まっている」とある日は、その宿を1件目に入れ、理由に「指定済み」と書く。
+- 実在が確認できるホテルだけ。推測でホテル名を作らない。見つからなければ hotels を空にし note に理由。
+- 価格は目安で、通貨を付ける(例: 約9万ウォン、約12,000円)。${prefs?`\n希望: ${prefs}`:''}`;
+  const list = days.map(d=>`${d.date}: 最終訪問先の周辺=${d.lastArea||'(訪問なし)'}${d.lastStops?`(${d.lastStops})`:''} / 翌日の最初の訪問先=${d.nextArea||'(なし)'}${d.fixed?` / 宿が決まっている: ${d.fixed}`:''}`).join('\n');
+  const out = await gemini({ parts:[{ text:`次の各日について、泊まるのにおすすめのホテルを調べてください。\n${list}` }], system, tools:[{ google_search:{} }] });
+  const dates = new Set(days.map(d=>d.date));
+  const res = (Array.isArray(out.days) ? out.days : []).filter(d=>d && dates.has(str(d.date))).map(d=>({ date: str(d.date), note: str(d.note).slice(0,300),
+    hotels: (Array.isArray(d.hotels) ? d.hotels : []).filter(x=>x && typeof x === 'object').slice(0,4).map(x=>({ name:str(x.name).slice(0,120), address:str(x.address).slice(0,200), area:str(x.area).slice(0,80), priceHint:str(x.priceHint).slice(0,60), reason:str(x.reason).slice(0,300) })).filter(x=>x.name) }));
+  return { days: res, note: str(out.note).slice(0,300) };
 }
 
 /* 住所検索: 会社名(+地域ヒント)から所在地を Google 検索付きで調べる。結果は必ず「要確認」として扱う */
@@ -195,7 +231,7 @@ function hhmm(v){ const m = /^(\d{1,2}):(\d{2})/.exec(String(v||'')); if (!m) re
 /* server.js から呼ぶ: 処理できたら true、対象外なら false */
 async function handle(req, res, url, { readBody, send }){
   const parts = url.pathname.split('/').filter(Boolean);
-  if (parts[0] !== 'api' || !['extract','assist','lookup','cards'].includes(parts[1])) return false;
+  if (parts[0] !== 'api' || !['extract','assist','lookup','cards','hotels'].includes(parts[1])) return false;
   if (req.method !== 'POST'){ send(res, 405, { error:'method not allowed' }); return true; }
   const limit = (parts[1] === 'extract' || parts[1] === 'cards') ? MAX_FILE : 2*1024*1024;
   const declared = Number(req.headers['content-length'] || 0);
@@ -208,9 +244,9 @@ async function handle(req, res, url, { readBody, send }){
       send(res, 200, out);
     } else {
       let json; try { json = JSON.parse((await readBody(req, 2*1024*1024)).toString('utf8')); } catch(e){ send(res, 400, { error:'invalid json' }); return true; }
-      send(res, 200, parts[1] === 'assist' ? await assist(json) : await lookup(json));
+      send(res, 200, parts[1] === 'assist' ? await assist(json) : parts[1] === 'hotels' ? await hotels(json) : await lookup(json));
     }
   } catch(e){ console.error('[ai]', e.message); send(res, e.status || 500, { error: e.message || 'AI処理に失敗しました' }); }
   return true;
 }
-module.exports = { handle, extract, assist, lookup, cards };
+module.exports = { handle, extract, assist, lookup, cards, hotels };
