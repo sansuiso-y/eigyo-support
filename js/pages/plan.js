@@ -246,9 +246,20 @@
     // end: その日の帰着地(null なら最終訪問先で終わり)。訪問なしでも出発地≠帰着地なら移動だけの行程になる
     const pts = [start, ...day.stops]; if (end && (day.stops.length || !samePt(end, start))) pts.push(end);
     const mode = (opt.dayPlaces && opt.dayPlaces[day.date] && opt.dayPlaces[day.date].mode) || 'car';
-    const r = pts.length < 2 ? { distanceKm:0, durationMin:0, geometry:[], legs:[], estimated:false } : isRoadMode(mode) ? await Geo.route(pts) : estimateRoute(pts, mode);
+    let r = pts.length < 2 ? { distanceKm:0, durationMin:0, geometry:[], legs:[], estimated:false } : isRoadMode(mode) ? await Geo.route(pts) : estimateRoute(pts, mode);
+    // 区間ごとの手段(訪問先 i へ向かう区間 = legs[i]。戻りの区間はその日の手段)。日の手段と違う区間だけ計算し直す
+    const legMode = i => (i < day.stops.length && day.stops[i].legMode) || mode;
+    if (pts.length >= 2 && day.stops.some(s=>s.legMode && s.legMode !== mode)){
+      const legs = (r.legs || []).slice();
+      for (let i = 0; i < pts.length - 1; i++){
+        const lm = legMode(i); if (lm === mode) continue;
+        if (isRoadMode(lm)){ const rr = await Geo.route([pts[i], pts[i+1]]); legs[i] = (rr.legs && rr.legs[0]) || { distanceKm: rr.distanceKm, durationMin: rr.durationMin }; }
+        else legs[i] = estimateRoute([pts[i], pts[i+1]], lm).legs[0];
+      }
+      r = Object.assign({}, r, { legs, distanceKm: legs.reduce((a,l)=>a+((l&&l.distanceKm)||0),0), durationMin: legs.reduce((a,l)=>a+((l&&l.durationMin)||0),0), byMode: r.byMode || day.stops.some(s=>s.legMode && !isRoadMode(s.legMode)) });
+    }
     const ws = toMin(opt.dayPlaces && opt.dayPlaces[day.date] && opt.dayPlaces[day.date].startTime) ?? toMin(opt.workStart) ?? 540; let t = ws; const rows = [];
-    day.stops.forEach((s,i)=>{ const leg = r.legs?.[i] || {durationMin:0, distanceKm:0}; let arr = t + leg.durationMin; let wait = 0; if (s.timeFrom && toMin(s.timeFrom) > arr){ wait = toMin(s.timeFrom) - arr; arr = toMin(s.timeFrom); } const late = s.timeTo && arr > toMin(s.timeTo); const dep = arr + stay(s); rows.push({ stop:s, arr, dep, wait, late, legKm:leg.distanceKm, legMin:leg.durationMin }); t = dep; });
+    day.stops.forEach((s,i)=>{ const leg = r.legs?.[i] || {durationMin:0, distanceKm:0}; let arr = t + leg.durationMin; let wait = 0; if (s.timeFrom && toMin(s.timeFrom) > arr){ wait = toMin(s.timeFrom) - arr; arr = toMin(s.timeFrom); } const late = s.timeTo && arr > toMin(s.timeTo); const dep = arr + stay(s); rows.push({ stop:s, arr, dep, wait, late, legKm:leg.distanceKm, legMin:leg.durationMin, legMode: legMode(i) }); t = dep; });
     let backMin = 0, backKm = 0; if (end && pts.length > day.stops.length + 1){ const leg = r.legs?.[day.stops.length]; if (leg){ backMin = leg.durationMin; backKm = leg.distanceKm; } }
     const travel = (!day.stops.length && pts.length >= 2) ? { from: start.label||'出発地', to: end.label||'帰着地', min: r.durationMin, km: r.distanceKm, flight: isRoadMode(mode) && !!r.estimated && r.distanceKm > 400, mode } : null;   // flight: 道路経路が取れず遠い = 飛行機などの移動(時間・距離は当てにしない)
     return { mode, byMode: !!r.byMode, rows, distanceKm: r.distanceKm, durationMin: r.durationMin, estimated: r.estimated, end: t + backMin, backMin, backKm, geometry: r.geometry || [], travel, startLabel: start.label||'', endLabel: end ? (end.label||'') : '' };
@@ -549,7 +560,7 @@
         if (!ready.length){ toast('座標のある訪問先がありません。住所を入力して「座標を取得」してください', {error:true}); return; }
         buildBtn.disabled = true; progress.textContent = '日ごとに振り分け中…';
         try {
-          const stops = ready.map(r=>({ key:r.key, label: rowLabel(r), name:r.name, company:r.company, address:r.address, lat:Number(r.lat), lng:Number(r.lng), stayMin: r.stayMin || settings.defaultStayMin || 45, customerId:r.customerId, memo:r.memo, date:r.date||'', timeFrom:r.timeFrom||'', timeTo:r.timeTo||'' }));
+          const stops = ready.map(r=>({ key:r.key, label: rowLabel(r), name:r.name, company:r.company, address:r.address, lat:Number(r.lat), lng:Number(r.lng), stayMin: r.stayMin || settings.defaultStayMin || 45, customerId:r.customerId, memo:r.memo, date:r.date||'', timeFrom:r.timeFrom||'', timeTo:r.timeTo||'', ...(r.legMode ? { legMode:r.legMode } : {}) }));
           const res = await buildPlan(start, stops, state, placesFor(Array.from({length: state.days}, (_,d)=>UI.addDays(state.startDate, d))));
           state.plan = { days: res.days, unassigned: res.unassigned, itins:{} };
           saveDraft(); await computeAll(); renderPlan();
@@ -610,6 +621,15 @@
             d.hotels.length && d.note ? h('div',{class:'small muted'}, d.note) : null); }),
           j.note ? h('p',{class:'small muted'}, j.note) : null);
         m = UI.modal({ title:'おすすめの宿', wide:true, body, actions:[{label:'閉じる', onClick:()=>{}}] });
+      }
+      /* その日の経路・メモ(「山水荘→羽田→仁川空港→청주역」や便名など)を手で書き換える */
+      async function editMemo(date, di){
+        const cur = (state.dayPlaces[date] || {}).memo || '';
+        const v = await UI.prompt(`${di+1}日目 ${UI.fmtDate(date)} の経路・メモ`, { label:'「→」で区切ると経路として表示します(例: 山水荘→羽田→仁川空港→청주역 / KE2102 9:40発)。空にすると消えます', value: cur, placeholder:'山水荘→羽田→仁川空港→청주역' });
+        if (v === null) return;
+        const o = Object.assign({}, state.dayPlaces[date] || {}); const t = String(v).trim(); if (t) o.memo = t; else delete o.memo;
+        if (Object.keys(o).length) state.dayPlaces[date] = o; else delete state.dayPlaces[date];
+        saveDraft(); renderPlan();
       }
       /* 日ごとの出発地・帰着地の変更 */
       async function editPlace(date, kind, di){
@@ -696,8 +716,14 @@
             list.appendChild(h('div',{class:'stop'},
               h('span',{class:'num'}, i+1),
               h('div',{class:'main'}, h('div',null, s.label, s.name ? h('span',{class:'small muted'}, ` / ${s.name}`) : null, s.customerId && Store.get('customers', s.customerId) ? h('a',{class:'tag', href:`#/customers?id=${s.customerId}`, title:'名刺を開く'}, '名刺') : null),
-                h('div',{class:'sub'}, row ? `${fmtT(row.arr)} 着 → ${fmtT(row.dep)} 発 ・ 移動 ${UI.fmtMin(row.legMin)} ${row.legKm?`(${row.legKm.toFixed(1)}km)`:''}${row.wait?` ・ 待ち${UI.fmtMin(row.wait)}`:''}` : '', s.timeFrom||s.timeTo ? h('span',{class: row?.late?'text-danger':'', style:{marginLeft:'4px'}}, `[希望 ${s.timeFrom||''}〜${s.timeTo||''}${row?.late?' 遅れ':''}]`) : null, s.date ? h('span',{class:'tag'}, '日指定') : null, s.address ? ` ・ ${s.address}` : '')),
+                h('div',{class:'sub'}, row ? `${fmtT(row.arr)} 着 → ${fmtT(row.dep)} 発 ・ ${modeOf(row.legMode || (it && it.mode))[1]} 移動 ${UI.fmtMin(row.legMin)} ${row.legKm?`(${row.legKm.toFixed(1)}km)`:''}${row.wait?` ・ 待ち${UI.fmtMin(row.wait)}`:''}` : '', s.timeFrom||s.timeTo ? h('span',{class: row?.late?'text-danger':'', style:{marginLeft:'4px'}}, `[希望 ${s.timeFrom||''}〜${s.timeTo||''}${row?.late?' 遅れ':''}]`) : null, s.date ? h('span',{class:'tag'}, '日指定') : null, s.address ? ` ・ ${s.address}` : '')),
               h('div',{class:'ctl'},
+                h('select',{class:'sm', title:'ここへ向かう移動手段', style:{width:'auto'}, onChange: async(e)=>{
+                  const v = e.target.value, base = (state.dayPlaces[day.date] || {}).mode || 'car';
+                  if (v === base) delete s.legMode; else s.legMode = v;
+                  const rowRef = state.rows.find(r=>r.key===s.key); if (rowRef){ if (s.legMode) rowRef.legMode = s.legMode; else delete rowRef.legMode; }   // 計画を作り直しても残す
+                  saveDraft(); await recompute(day);
+                }}, MODES.map(([k, ic, lb])=>h('option',{value:k, selected: (s.legMode || (state.dayPlaces[day.date] || {}).mode || 'car') === k}, `${ic} ${lb}`))),
                 h('button',{class:'btn sm', disabled:i===0, onClick:()=>{ [day.stops[i-1],day.stops[i]]=[day.stops[i],day.stops[i-1]]; recompute(day); }}, '↑'),
                 h('button',{class:'btn sm', disabled:i===day.stops.length-1, onClick:()=>{ [day.stops[i+1],day.stops[i]]=[day.stops[i],day.stops[i+1]]; recompute(day); }}, '↓'),
                 h('select',{class:'sm', title:'別の日に移す', onChange:(e)=>moveTo(day, s, e.target.value)}, [['', '移す…'], ...dayOptions.filter(o=>o[0]!==day.date), ['__un','未割当へ']].map(([v,l])=>h('option',{value:v},l))),
@@ -710,7 +736,7 @@
             h('span',{style:{marginLeft:'8px'}}, '帰着: ', h('b',null, de ? de.label : 'なし(最終訪問先で終了)'), h('span',{class:'muted'}, dp.end ? '' : (de ? '(出発地に戻る)' : ''))),
             h('button',{class:'btn sm', style:{padding:'2px 8px'}, onClick:()=>editPlace(day.date, 'end', di)}, '変更'),
             h('label',{class:'row small', style:{gap:'4px', marginLeft:'8px', cursor:'pointer'}}, h('input',{type:'checkbox', checked: !!dp.travelOnly, onChange:(e)=>setTravelOnly(day, e.target.checked)}), '移動日(訪問なし)'),
-            h('label',{class:'row small', style:{gap:'4px', marginLeft:'8px'}}, '移動手段',
+            h('label',{class:'row small', style:{gap:'4px', marginLeft:'8px'}, title:'この日の基本の移動手段。訪問先ごとの区間は各行で変えられます'}, '移動手段',
               h('select',{class:'sm', style:{width:'auto', minHeight:'28px', padding:'2px 6px'}, onChange: async(e)=>{ const o = Object.assign({}, state.dayPlaces[day.date] || {}); if (e.target.value === 'car') delete o.mode; else o.mode = e.target.value; if (Object.keys(o).length) state.dayPlaces[day.date] = o; else delete state.dayPlaces[day.date]; saveDraft(); try { await computeAll(); } catch(err){ console.warn(err); } renderPlan(); }},
                 MODES.map(([k, ic, lb])=>h('option',{value:k, selected: (dp.mode || 'car') === k}, `${ic} ${lb}`)))));
           planEl.appendChild(h('div',{class:'card'},
@@ -719,8 +745,9 @@
             (day.warnings||[]).length ? h('div',{class:'notice text-danger small'}, day.warnings.map(w=>h('div',null,'⚠ '+w))) : null,
             placesRow,
             dp.memo ? (/→|->/.test(dp.memo)
-              ? h('div',{class:'row small', style:{gap:'4px', alignItems:'center', flexWrap:'wrap', marginBottom:'6px'}}, h('span',null,'🧭 経路:'), dp.memo.split(/\s*(?:→|->)\s*/).filter(Boolean).flatMap((pt,k,arr)=>[h('span',{class:'badge'+((ds && pt===ds.label) || (de && pt===de.label) ? ' done' : '')}, pt), k < arr.length-1 ? h('span',{class:'muted'},'→') : null]).filter(Boolean))
-              : h('div',{class:'small', style:{marginBottom:'6px'}}, `📝 ${dp.memo}`)) : null,
+              ? h('div',{class:'row small', style:{gap:'4px', alignItems:'center', flexWrap:'wrap', marginBottom:'6px'}}, h('span',null,'🧭 経路:'), ...dp.memo.split(/\s*(?:→|->)\s*/).filter(Boolean).flatMap((pt,k,arr)=>[h('span',{class:'badge'+((ds && pt===ds.label) || (de && pt===de.label) ? ' done' : '')}, pt), k < arr.length-1 ? h('span',{class:'muted'},'→') : null]).filter(Boolean), h('button',{class:'btn sm', style:{padding:'2px 8px', marginLeft:'4px'}, onClick:()=>editMemo(day.date, di)}, '変更'))
+              : h('div',{class:'row small', style:{gap:'6px', alignItems:'center', marginBottom:'6px'}}, h('span',null, `📝 ${dp.memo}`), h('button',{class:'btn sm', style:{padding:'2px 8px'}, onClick:()=>editMemo(day.date, di)}, '変更')))
+              : (dp.travelOnly ? h('div',{class:'row small', style:{marginBottom:'6px'}}, h('button',{class:'btn sm', style:{padding:'2px 8px'}, onClick:()=>editMemo(day.date, di)}, '＋ 経路・メモを書く')) : null),
             dp.startTime ? h('div',{class:'small muted', style:{marginBottom:'6px'}}, `この日の活動開始 ${dp.startTime}`) : null,
             it && it.travel ? h('div',{class:'small', style:{marginBottom:'6px'}}, it.travel.flight ? `✈️ 移動 ${it.travel.from} → ${it.travel.to}(飛行機などの移動。所要時間は計算していません)` : `${modeOf(it.mode)[1]} ${modeOf(it.mode)[2]}で移動 ${it.travel.from} → ${it.travel.to} ・ ${UI.fmtMin(it.travel.min)}${it.travel.km ? ` (${it.travel.km.toFixed(1)}km)` : ''}${it.byMode ? '(目安: 直線距離から推定、乗り換え・待ち込み)' : it.estimated ? '(推定)' : ''}`) : null,
             dp.travelOnly && !dp.memo && !(ds && de && !samePt(ds, de)) ? h('div',{class:'small text-warn', style:{marginBottom:'6px'}}, '移動日です。「出発」「帰着」で空港や次の宿を設定すると移動の行程が出ます') : null,
