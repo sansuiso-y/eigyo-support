@@ -59,40 +59,32 @@ App.register('route', {
     const itinEl = h('div');
     const savedEl = h('div',{class:'list'});
 
-    /* ---------- 地図 ---------- */
-    let map = null, layer = null;
+    /* ---------- 地図(MapKit: Google Maps、鍵が無ければ OpenStreetMap) ---------- */
+    let map = null, mapInit = null;
     function initMap(){
-      if (map || !hasL) return;
-      try {
-        map = L.map(mapEl, {scrollWheelZoom:false});
-        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {attribution:'&copy; OpenStreetMap contributors', maxZoom:19}).addTo(map);
-        layer = L.layerGroup().addTo(map);
-        map.setView([36.5, 137.8], 5);
-      } catch(e){ console.warn('Leaflet init failed', e); map = null; layer = null; }
+      if (mapInit) return mapInit;
+      mapInit = (async()=>{ try { map = await MapKit.create(mapEl, {scrollWheelZoom:false}); } catch(e){ console.warn('map init failed', e); map = null; } return map; })();
+      return mapInit;
     }
-    function marker(p, text, cls){
-      const icon = L.divIcon({className:'num-marker'+(cls?' '+cls:''), html: String(text), iconSize:[26,26], iconAnchor:[13,13], popupAnchor:[0,-12]});
-      const m = L.marker([Number(p.lat), Number(p.lng)], {icon});
-      const pop = h('div', null, h('div',{style:{fontWeight:600}}, p.label || ''), h('div',{class:'small muted'}, p.address || coordText(p)));
-      m.bindPopup(pop);
-      return m;
-    }
-    function drawMap(){
-      if (!hasL){ mapNote.textContent = '地図ライブラリ(Leaflet)を読み込めないため地図は表示できません。リストと行程表は利用できます。'; return; }
-      initMap();
+    function popupOf(p){ return h('div', null, h('div',{style:{fontWeight:600}}, p.label || ''), h('div',{class:'small muted'}, p.address || coordText(p))); }
+    let drawSeq = 0;
+    async function drawMap(){
+      if (!MapKit.available()){ mapNote.textContent = '地図ライブラリを読み込めないため地図は表示できません。リストと行程表は利用できます。'; return; }
+      const seq = ++drawSeq;
+      await initMap();
+      if (seq !== drawSeq) return; // 描画中に状態が変わったら最新の呼び出しに任せる
       if (!map){ mapNote.textContent = '地図の初期化に失敗しました。リストと行程表は利用できます。'; return; }
       mapNote.textContent = '';
-      layer.clearLayers();
+      map.clear();
       const pts = [];
-      if (hasCoord(state.start)){ layer.addLayer(marker(state.start, 'S', 'start')); pts.push([Number(state.start.lat), Number(state.start.lng)]); }
-      state.stops.forEach((s,i)=>{ if (hasCoord(s)){ layer.addLayer(marker(s, i+1)); pts.push([Number(s.lat), Number(s.lng)]); } });
+      if (hasCoord(state.start)){ map.marker(state.start, { text:'S', cls:'start', popup: popupOf(state.start) }); pts.push([Number(state.start.lat), Number(state.start.lng)]); }
+      state.stops.forEach((s,i)=>{ if (hasCoord(s)){ map.marker(s, { text:i+1, popup: popupOf(s) }); pts.push([Number(s.lat), Number(s.lng)]); } });
       if (state.result && state.result.geometry && state.result.geometry.length > 1){
-        layer.addLayer(L.polyline(state.result.geometry, {color:'#1f6fdb', weight:5, opacity:.8, dashArray: state.result.estimated ? '8 8' : null}));
+        map.line(state.result.geometry, { color:'#1f6fdb', weight:5, opacity:.8, dashed: !!state.result.estimated });
         state.result.geometry.forEach(g=>pts.push(g));
       }
-      try { map.invalidateSize(); } catch(e){}
-      if (pts.length === 1) map.setView(pts[0], 14);
-      else if (pts.length > 1) map.fitBounds(L.latLngBounds(pts), {padding:[30,30]});
+      map.invalidate();
+      map.fit(pts);
     }
 
     /* ---------- 出発地 ---------- */

@@ -408,6 +408,7 @@
         setOnline(false, new Error(res.ok ? '同期サーバーの応答ではありません' : `サーバーエラー ${res.status}`)); return false;
       }
       st.auth = !!s.auth; st.user = s.user || null; st.needLogin = false; setOnline(true);
+      if (window.MapKit) MapKit.setKey(s.mapsKey || ''); // 地図を Google Maps にする鍵(無ければ OpenStreetMap)
       if (st.user && st.user.displayName && !Store.settings().userName) Store.saveSettings({ userName: st.user.displayName }); // 氏名が未設定ならログイン名から
       return true;
     }

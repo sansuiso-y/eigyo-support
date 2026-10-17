@@ -111,7 +111,7 @@ async function api(req, res, url){
   const kind = parts[1], sub = parts[2];
 
   if (kind === 'status' && req.method === 'GET'){
-    return send(res, 200, { app:'sales-support', version:1, ai: !!process.env.GEMINI_API_KEY, auth: AUTH, user: AUTH ? Auth.publicUser(req.user) : null, updatedAt: data ? data.updatedAt : null, files: Object.keys(filesMeta).length });
+    return send(res, 200, { app:'sales-support', version:1, ai: !!process.env.GEMINI_API_KEY, mapsKey: process.env.GOOGLE_MAPS_API_KEY || '', auth: AUTH, user: AUTH ? Auth.publicUser(req.user) : null, updatedAt: data ? data.updatedAt : null, files: Object.keys(filesMeta).length });
   }
 
   if (kind === 'data'){

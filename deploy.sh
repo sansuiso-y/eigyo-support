@@ -35,6 +35,7 @@ gcloud storage buckets add-iam-policy-binding gs://$BUCKET --member="serviceAcco
 gcloud secrets add-iam-policy-binding $SETUP_SECRET --member="serviceAccount:$SA" --role=roles/secretmanager.secretAccessor --project=$PROJECT >/dev/null
 gcloud secrets add-iam-policy-binding $SESSION_SECRET_NAME --member="serviceAccount:$SA" --role=roles/secretmanager.secretAccessor --project=$PROJECT >/dev/null
 gcloud secrets add-iam-policy-binding GEMINI_API_KEY --member="serviceAccount:$SA" --role=roles/secretmanager.secretAccessor --project=$PROJECT >/dev/null  # 写真読み取り・AI注文用(社内共用キー)
+gcloud secrets add-iam-policy-binding GOOGLE_MAPS_API_KEY --member="serviceAccount:$SA" --role=roles/secretmanager.secretAccessor --project=$PROJECT >/dev/null  # 地図表示(Google Maps JavaScript API。ブラウザ用の鍵、サイト限定・1日500回まで)
 
 echo "③ Cloud Run へデプロイ(3〜5分かかります)..."
 gcloud run deploy $SERVICE \
@@ -46,7 +47,7 @@ gcloud run deploy $SERVICE \
   --memory=1Gi \
   --timeout=300 \
   --set-env-vars=DATA_DIR=/data,TRUST_PROXY=1,AUTH_REQUIRED=1 \
-  --set-secrets=SETUP_CODE=$SETUP_SECRET:latest,SESSION_SECRET=$SESSION_SECRET_NAME:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest \
+  --set-secrets=SETUP_CODE=$SETUP_SECRET:latest,SESSION_SECRET=$SESSION_SECRET_NAME:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,GOOGLE_MAPS_API_KEY=GOOGLE_MAPS_API_KEY:latest \
   --add-volume=name=data,type=cloud-storage,bucket=$BUCKET \
   --add-volume-mount=volume=data,mount-path=/data
 
