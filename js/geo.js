@@ -7,16 +7,33 @@
   async function throttle(){ const wait = 1100 - (Date.now()-lastNominatim); if (wait>0) await new Promise(r=>setTimeout(r,wait)); lastNominatim = Date.now(); }
 
   /* 住所の簡略化候補: 「…, 1층」「…ビル3F」などを落として順に試す */
+  /* 住所の候補を、詳しい順に返す(そのまま → 号室・階・括弧なし → 建物名なし → 韓国の略称を正式名に/道・市を外す → 番地なし) */
+  const HANGUL = /[가-힣]/;
+  const KR_PREFIX = { '충북':'충청북도', '충남':'충청남도', '전북':'전라북도', '전남':'전라남도', '경북':'경상북도', '경남':'경상남도', '경기':'경기도', '강원':'강원도', '제주':'제주특별자치도',
+    '서울':'서울특별시', '서울시':'서울특별시', '부산시':'부산광역시', '대구시':'대구광역시', '인천시':'인천광역시', '대전시':'대전광역시', '울산시':'울산광역시', '세종시':'세종특별자치시' };
   function variants(address){
-    const out = [address];
-    const noFloor = address.replace(/[\s,、]*([0-9０-９]+\s*(층|階|[FfＦ])|[0-9０-９]+(号室|号|호))(\s.*)?$/u,'').trim();
-    if (noFloor && noFloor !== address) out.push(noFloor);
-    const beforeComma = address.split(/[,、]/)[0].trim();
-    if (beforeComma && !out.includes(beforeComma)) out.push(beforeComma);
-    const noParen = beforeComma.replace(/[（(].*?[)）]/g,'').trim();
-    if (noParen && !out.includes(noParen)) out.push(noParen);
-    const noBldg = noParen.replace(/\s*[^\s\d]*?(ビル|ビルヂング|タワー|会館|センター|マンション|ハイツ|プラザ|スクエア|ヒルズ)[^\s]*$/u,'').trim();
-    if (noBldg && !out.includes(noBldg)) out.push(noBldg);
+    const out = [];
+    const push = v => { v = String(v||'').replace(/\s+/g,' ').replace(/[\s,、]+$/,'').trim(); if (v && !out.includes(v)) out.push(v); };
+    push(address);
+    let a = address.replace(/[（(][^)）]*[)）]?/g, ' ');                                             // 括弧の中(閉じていなくても)を除く: "(사창동)" "(서소문동, 내일투어빌딩)"
+    a = a.replace(/[\s,、]*([0-9０-９]+\s*(층|階|[FfＦ])|[0-9０-９]+(号室|号|호))(\s.*)?$/u, '');    // 階・号室
+    push(a);
+    const beforeComma = a.split(/[,、]/)[0]; push(beforeComma);
+    const noBldg = beforeComma
+      .replace(/\s*[^\s\d]*?(ビル|ビルヂング|タワー|会館|センター|マンション|ハイツ|プラザ|スクエア|ヒルズ)[^\s]*$/u, '')
+      .replace(/\s*\S*(빌딩|타워|상가동|상가|아파트|오피스텔|프라자|센터|회관)\S*/gu, '')                 // 韓国語の建物名
+      .trim();
+    push(noBldg);
+    if (HANGUL.test(address)){
+      const tight = noBldg.replace(/(로|길)\s+(\d+번(가)?길)/g, '$1$2');                            // "구룡산로 52번가길" → "구룡산로52번가길"(Nominatim は続けて書く表記しか見つけない)
+      if (tight !== noBldg) push(tight);
+      const m = /^(\S+)\s+(.*)$/.exec(tight);
+      let base = tight;
+      if (m && KR_PREFIX[m[1]]){ push(KR_PREFIX[m[1]] + ' ' + m[2]); base = m[2]; }                  // "충북 청주시 …" → "충청북도 청주시 …"
+      if (m && (KR_PREFIX[m[1]] || /(도|특별시|광역시)$/.test(m[1]))) push(m[2]);                        // 道・特別市を外して市から
+      const noNum = base.replace(/\s+\d+(-\d+)?\s*$/, '').trim();                                     // 番地を外して道路名まで(近似。要確認になる)
+      if (noNum && noNum !== base && /\S\s\S/.test(noNum)) push(noNum);
+    }
     return out;
   }
   const missCache = new Set(); // このセッション中に見つからなかった住所(再問い合わせを避ける)
@@ -35,9 +52,9 @@
   }
   async function geocodeOne(address){
     if (geoCache[address]) return geoCache[address];
-    // まず日本国内で検索し、見つからなければ国を限定せずに再検索(海外出張の訪問先向け)
+    // まず日本国内で検索し、見つからなければ国を限定せずに再検索(海外出張の訪問先向け)。ハングルの住所は韓国だけ
     let arr = [];
-    for (const cc of ['jp', '']){
+    for (const cc of (HANGUL.test(address) ? ['kr'] : ['jp', ''])){                                // ハングルなら韓国だけを検索(日本での空振りを省く)
       await throttle();
       const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1${cc?'&countrycodes='+cc:''}&accept-language=ja&q=${encodeURIComponent(address)}`;
       const res = await fetch(url, {headers:{'Accept':'application/json'}});

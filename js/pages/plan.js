@@ -280,6 +280,7 @@
           h('label',{class:'row small', style:{gap:'4px'}}, h('input',{type:'checkbox', checked:!!state.onlyNew, onChange:(e)=>{ state.onlyNew=e.target.checked; saveDraft(); renderList(); }}), '名刺に未登録の行だけ表示'),
           h('span',{style:{flex:1}}),
           h('button',{class:'btn sm', title:'登録済みの名刺と自動で照合し直します(名刺を取り込んだ後に)', onClick:()=>{ let n=0; state.rows.forEach(r=>{ if (!(r.customerId && Store.get('customers', r.customerId))){ r.customerId=null; const c=findCustomer(r); if (c){ linkFromCard(r,c); n++; } } }); saveDraft(); renderList(); toast(n ? `${n}件を名刺と紐付けました` : '新たに一致する名刺はありませんでした'); }}, '🔗 名刺と照合'),
+          h('button',{class:'btn sm', title:'座標のある訪問先を地図に表示します', onClick:()=>showMap(null)}, '🗺 地図で見る'),
           h('button',{class:'btn sm', onClick:lookupAddresses, title:'住所が空の行について、会社名からAIがWeb検索で所在地を調べます(要確認)'}, '🌐 AIで住所を調べる'),
           h('button',{class:'btn sm', onClick:geocodeAll}, '📍 選択行の座標を取得'),
           h('button',{class:'btn sm', onClick:registerCustomers}, '👤 選択行を名刺に登録'),
@@ -307,7 +308,7 @@
             h('td',null, h('input',{type:'date', value:r.date||'', style:{width:'150px'}, onChange:(e)=>{ r.date=e.target.value; saveDraft(); }})),
             h('td',null, h('div',{class:'row', style:{flexWrap:'nowrap', gap:'2px'}}, h('input',{type:'time', value:r.timeFrom||'', style:{width:'105px'}, title:'この時刻以降', onChange:(e)=>{ r.timeFrom=e.target.value; saveDraft(); }}), '〜', h('input',{type:'time', value:r.timeTo||'', style:{width:'105px'}, title:'この時刻まで', onChange:(e)=>{ r.timeTo=e.target.value; saveDraft(); }}))),
             h('td',null, h('input',{type:'number', value:r.stayMin||'', placeholder:String(settings.defaultStayMin||45), min:5, step:5, style:{width:'70px'}, onChange:(e)=>{ r.stayMin = Number(e.target.value)||null; saveDraft(); }})),
-            h('td',{class:'nowrap small'}, hasCoord(r) ? (r.geoNote ? h('span',{class:'badge draft', title:r.geoNote}, '要確認') : h('span',{class:'badge done'},'OK')) : h('span',{class:'badge draft'}, r.address ? '未取得' : '住所なし')),
+            h('td',{class:'nowrap small'}, hasCoord(r) ? h('a',{href:'#', class:'badge '+(r.geoNote?'draft':'done'), title:(r.geoNote ? r.geoNote+' / ' : '')+'クリックで地図に表示', style:{textDecoration:'none', cursor:'pointer'}, onClick:(e)=>{ e.preventDefault(); showMap(r); }}, r.geoNote ? '要確認 🗺' : 'OK 🗺') : h('span',{class:'badge draft'}, r.address ? '未取得' : '住所なし')),
             h('td',null, h('button',{class:'btn sm', onClick:()=>{ state.rows = state.rows.filter(x=>x!==r); saveDraft(); renderList(); }}, '✕'))
           );
           tb.appendChild(tr);
@@ -537,6 +538,32 @@
       }
 
       /* ===== 描画 ===== */
+      /* ===== 訪問先を地図で見る ===== */
+      function showMap(focus){
+        if (typeof L === 'undefined'){ toast('地図ライブラリを読み込めませんでした(通信状況を確認してください)', {error:true}); return; }
+        const list = state.rows.filter(r=>(!state.filter || r.category===state.filter));
+        const withPos = list.filter(hasCoord), noPos = list.filter(r=>!hasCoord(r));
+        if (!withPos.length && !(focus && hasCoord(focus))){ toast('座標のある訪問先がありません。「選択行の座標を取得」を先に押してください', {error:true}); return; }
+        const mapEl = h('div',{class:'map', style:{height:'62vh'}});
+        const legend = h('div',{class:'small muted mt'}, `● 番号は表の並び順。S は出発地。` + (noPos.length ? ` 座標がなく地図に出ていない: ${noPos.map(r=>r.company||r.name).filter(Boolean).slice(0,8).join('、')}${noPos.length>8?' ほか':''}` : ''));
+        UI.modal({ title: focus ? `${focus.company||focus.name||'訪問先'} の場所` : `訪問先の地図(${withPos.length}件)`, wide:true, body: h('div',null, mapEl, legend), actions:[{label:'閉じる', onClick:()=>{}}] });
+        setTimeout(()=>{
+          try {
+            const map = L.map(mapEl, {scrollWheelZoom:true});
+            L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {attribution:'&copy; OpenStreetMap contributors', maxZoom:19}).addTo(map);
+            const pts = [];
+            const mk = (p, text, cls, popup) => { const m = L.marker([Number(p.lat), Number(p.lng)], {icon: L.divIcon({className:'num-marker'+(cls?' '+cls:''), html:String(text), iconSize:[26,26], iconAnchor:[13,13], popupAnchor:[0,-12]})}).addTo(map); m.bindPopup(popup); pts.push([Number(p.lat), Number(p.lng)]); return m; };
+            if (Number.isFinite(Number(state.startLat)) && Number.isFinite(Number(state.startLng)) && state.startLat !== null && state.startLat !== '') mk({lat:state.startLat, lng:state.startLng}, 'S', 'start', h('div',null, h('b',null, state.startLabel||'出発地'), h('div',{class:'small muted'}, state.startAddress||'')));
+            let focusMarker = null;
+            withPos.forEach(r=>{ const i = list.indexOf(r)+1; const m = mk(r, i, r===focus?'start':'', h('div',null, h('b',null, r.company||''), r.name ? h('div',{class:'small'}, r.name) : null, h('div',{class:'small muted'}, r.address||''), r.geoNote ? h('div',{class:'small text-warn'}, '⚠ 要確認: '+r.geoNote) : null)); if (r===focus) focusMarker = m; });
+            map.invalidateSize();
+            if (focus && hasCoord(focus)){ map.setView([Number(focus.lat), Number(focus.lng)], 16); if (focusMarker) focusMarker.openPopup(); }
+            else if (pts.length === 1) map.setView(pts[0], 15);
+            else map.fitBounds(L.latLngBounds(pts), {padding:[30,30]});
+          } catch(e){ console.error(e); legend.textContent = '地図の表示に失敗しました: ' + (e.message||e); }
+        }, 60);
+      }
+
       /* ===== 保存した計画(全員で共有。端末内の下書きとは別) ===== */
       const SAVE_KEYS = ['rows','filter','onlyNew','startDate','days','workStart','workEnd','roundTrip','startAddress','startLat','startLng','startLabel'];
       function snapshot(name){
