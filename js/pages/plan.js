@@ -9,6 +9,7 @@
   const fmtT = m => { m = Math.round(m); const d = Math.floor(m/1440); m -= d*1440; return `${UI.pad(Math.floor(m/60))}:${UI.pad(m%60)}${d?`(+${d}日)`:''}`; };
   const isNum = v => v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v));
   const hasCoord = p => !!p && isNum(p.lat) && isNum(p.lng);
+  const samePt = (a,b) => !!a && !!b && Math.abs(Number(a.lat)-Number(b.lat)) < 1e-6 && Math.abs(Number(a.lng)-Number(b.lng)) < 1e-6;
   const norm = s => String(s||'').replace(/\s+/g,'').toLowerCase();
   function emptyRow(){ return { key: UI.uid(), checked:true, company:'', name:'', title:'', category:'', phone:'', address:'', memo:'', stayMin:null, lat:null, lng:null, customerId:null, date:'', timeFrom:'', timeTo:'' }; }
   function rowLabel(r){ return r.company || r.name || '(名称なし)'; }
@@ -134,41 +135,53 @@
   }
 
   /* ---------- 日ごとの振り分け(希望日・時間帯を守る) ---------- */
-  async function buildPlan(start, stops, opt){
+  async function buildPlan(start, stops, opt, places){
     // stops: 座標ありの行 {.., date?, timeFrom?, timeTo?, stayMin}。opt: {startDate, days, workStart, workEnd, roundTrip}
-    const pts = [start, ...stops];
+    // places: 日ごとの { starts:[地点], ends:[地点|null], travelOnly:[bool] }(無ければ全日とも全体の出発地)
+    const dates = Array.from({length:opt.days},(_,d)=>UI.addDays(opt.startDate,d));
+    const dayStarts = places ? places.starts : dates.map(()=>start);
+    const dayEnds = places ? places.ends : dates.map(()=>opt.roundTrip ? start : null);
+    const travelOnly = places ? places.travelOnly : dates.map(()=>false);
+    // 距離表の地点: [全体の出発地, 各日の出発地・帰着地(重複なし), ...訪問先]
+    const anchors = [];
+    const anchorIdx = p => { let i = anchors.findIndex(a=>samePt(a,p)); if (i < 0){ anchors.push(p); i = anchors.length-1; } return i; };
+    dayStarts.forEach(p=>{ if (p) anchorIdx(p); }); dayEnds.forEach(p=>{ if (p) anchorIdx(p); });
+    if (!anchors.length) anchorIdx(start);                 // 到達判定は、実際にどこかの日で使う出発地・帰着地から
+    const A = anchors.length;
+    const pts = [...anchors, ...stops];
     const M = await Geo.matrix(pts);               // 分
     const UNREACH = 1e5;                                   // OSRM が到達不能とした区間(1e6)の判定
-    const reachable = stops.map((_,i)=> M[0][i+1] < UNREACH);
+    const reachable = stops.map((_,i)=> anchors.some((_,a)=> M[a][A+i] < UNREACH));
     if (!reachable.some(Boolean)){
-      const far = stops.reduce((a,s)=>Math.max(a, Geo.haversineKm(start, s)), 0);
+      const far = stops.reduce((a,s)=>Math.max(a, Geo.haversineKm(anchors[0], s)), 0);
       const e = new Error(far > 300 ? `出発地から訪問先まで道路でたどり着けません(最も遠い訪問先まで約${Math.round(far)}km)。海外や遠方の出張では、出発地を「現地の宿泊ホテルや駅」に設定してください` : '出発地から訪問先への経路が見つかりません。出発地や住所の座標を確認してください');
       e.code = 'unreachable'; throw e;
     }
     const ws = toMin(opt.workStart) ?? 540, we = toMin(opt.workEnd) ?? 1080;
     stops.forEach(s=>{ delete s.note; });
-    const idx = new Map(stops.map((s,i)=>[s,i]));
-    const travel = (a,b) => M[a?idx.get(a)+1:0][b?idx.get(b)+1:0];
-    const dates = Array.from({length:opt.days},(_,d)=>UI.addDays(opt.startDate,d));
-    const days = dates.map(date=>({ date, stops:[], must:[], warnings:[] }));
+    const idx = new Map(stops.map((s,i)=>[s,A+i]));
+    const pidx = p => idx.has(p) ? idx.get(p) : anchorIdx(p);   // 訪問先 or 出発地・帰着地
+    const travel = (a,b) => M[pidx(a)][pidx(b)];
+    const days = dates.map((date,i)=>({ date, stops:[], must:[], warnings:[], travelOnly: !!travelOnly[i], start: dayStarts[i], end: dayEnds[i] }));
     const unassigned = [];
     let pool = [];
     for (const s of stops){
-      if (!reachable[idx.get(s)]){ s.note = '出発地から道路でたどり着けません(座標か出発地を確認)'; unassigned.push(s); continue; }
-      if (s.date){ const d = days.find(x=>x.date===s.date); if (d) d.must.push(s); else { s.note = `希望日 ${s.date} が期間外`; unassigned.push(s); } }
+      if (!reachable[idx.get(s) - A]){ s.note = '出発地から道路でたどり着けません(座標か出発地を確認)'; unassigned.push(s); continue; }   // reachable は訪問先の並び(0..)、idx は距離表の添字(A..)
+      if (s.date){ const d = days.find(x=>x.date===s.date); if (d && d.travelOnly){ s.note = `希望日 ${s.date} は移動日のため割り当てません`; unassigned.push(s); } else if (d) d.must.push(s); else { s.note = `希望日 ${s.date} が期間外`; unassigned.push(s); } }
       else pool.push(s);
     }
     for (const day of days){
+      if (day.travelOnly || !day.start){ day.must.forEach(s=>{ s.note = day.travelOnly ? `希望日 ${day.date} は移動日のため割り当てません` : `希望日 ${day.date} の出発地が決まらないため割り当てません`; unassigned.push(s); }); day.stops = []; continue; }   // 移動日(訪問なし)、または出発地が決まらない日
       const timed = day.must.filter(s=>s.timeFrom).sort((a,b)=>toMin(a.timeFrom)-toMin(b.timeFrom));
       let mustFree = day.must.filter(s=>!s.timeFrom);
-      let cur = null, t = ws; const order = [];
+      let cur = day.start, t = ws; const order = [];
       const MAX_WAIT = 60; // 希望時間まで待てる上限(分)。それ以上なら今は入れず、後で入れる
       const fits = (s, limit) => {
         let arr = t + travel(cur,s), wait = 0;
         if (s.timeFrom){ const tf = toMin(s.timeFrom); if (tf !== null && tf > arr){ wait = tf - arr; if (wait > MAX_WAIT) return null; arr = tf; } }
         if (s.timeTo){ const tt = toMin(s.timeTo); if (tt !== null && arr > tt) return null; }
         const dep = arr + stay(s);
-        const after = timed.length ? travel(s, timed[0]) : (opt.roundTrip ? travel(s, null) : 0);
+        const after = timed.length ? travel(s, timed[0]) : (day.end ? travel(s, day.end) : 0);
         return dep + after <= limit ? {arr,dep,wait} : null;
       };
       while (true){
@@ -196,20 +209,22 @@
     // 時刻指定のない日は2-optで並べ直し
     for (const day of days){
       if (day.stops.length > 2 && !day.stops.some(s=>s.timeFrom)){
-        try { const r = await Geo.optimize(start, day.stops, {roundTrip: opt.roundTrip}); day.stops = r.stops; } catch(e){}
+        try { const r = await Geo.optimize(day.start, day.stops, { roundTrip: !!day.end && samePt(day.end, day.start), end: day.end && !samePt(day.end, day.start) ? day.end : null }); day.stops = r.stops; } catch(e){}
       }
-      delete day.must;
+      delete day.must; delete day.start; delete day.end;   // 出発地・帰着地は state.dayPlaces から毎回解決する
     }
     return { days, unassigned };
   }
   const stay = s => Number(s.stayMin) > 0 ? Number(s.stayMin) : 45;
-  async function itinerary(start, day, opt){
-    const pts = [start, ...day.stops]; if (opt.roundTrip && day.stops.length) pts.push(start);
-    const r = await Geo.route(pts);
+  async function itinerary(start, end, day, opt){
+    // end: その日の帰着地(null なら最終訪問先で終わり)。訪問なしでも出発地≠帰着地なら移動だけの行程になる
+    const pts = [start, ...day.stops]; if (end && (day.stops.length || !samePt(end, start))) pts.push(end);
+    const r = pts.length >= 2 ? await Geo.route(pts) : { distanceKm:0, durationMin:0, geometry:[], legs:[], estimated:false };
     const ws = toMin(opt.workStart) ?? 540; let t = ws; const rows = [];
     day.stops.forEach((s,i)=>{ const leg = r.legs?.[i] || {durationMin:0, distanceKm:0}; let arr = t + leg.durationMin; let wait = 0; if (s.timeFrom && toMin(s.timeFrom) > arr){ wait = toMin(s.timeFrom) - arr; arr = toMin(s.timeFrom); } const late = s.timeTo && arr > toMin(s.timeTo); const dep = arr + stay(s); rows.push({ stop:s, arr, dep, wait, late, legKm:leg.distanceKm, legMin:leg.durationMin }); t = dep; });
-    let backMin = 0, backKm = 0; if (opt.roundTrip && day.stops.length){ const leg = r.legs?.[day.stops.length]; if (leg){ backMin = leg.durationMin; backKm = leg.distanceKm; } }
-    return { rows, distanceKm: r.distanceKm, durationMin: r.durationMin, estimated: r.estimated, end: t + backMin, backMin, backKm, geometry: r.geometry || [] };
+    let backMin = 0, backKm = 0; if (end && pts.length > day.stops.length + 1){ const leg = r.legs?.[day.stops.length]; if (leg){ backMin = leg.durationMin; backKm = leg.distanceKm; } }
+    const travel = (!day.stops.length && pts.length >= 2) ? { from: start.label||'出発地', to: end.label||'帰着地', min: r.durationMin, km: r.distanceKm } : null;
+    return { rows, distanceKm: r.distanceKm, durationMin: r.durationMin, estimated: r.estimated, end: t + backMin, backMin, backKm, geometry: r.geometry || [], travel, startLabel: start.label||'', endLabel: end ? (end.label||'') : '' };
   }
 
   const DAY_COLORS = ['#1f6fdb','#e0532f','#2e9e5b','#8e44ad','#d9a400','#17a2b8','#c2185b','#5d6d7e'];
@@ -230,6 +245,16 @@
       function saveDraft(){ const o = Object.assign({}, state); delete o.filterOptions; Store.save('plans', o); state.id = o.id; }
       // 出発地の座標。未設定なら null(Number(null) が 0 になって (0,0)=ギニア湾 を出発地にしてしまう事故を防ぐ)
       const startPt = () => (isNum(state.startLat) && isNum(state.startLng)) ? { lat:Number(state.startLat), lng:Number(state.startLng) } : null;
+      /* 日ごとの出発地・帰着地(state.dayPlaces[date] = { start?, end?, travelOnly? })。
+         未設定の日は: 出発地 = 前日の帰着地(初日は全体の出発地)、帰着地 = 「出発地に戻る」ならその日の出発地、そうでなければ無し */
+      state.dayPlaces = state.dayPlaces || {};
+      const globalStart = () => { const sp = startPt(); return sp ? Object.assign({ label: state.startLabel||'出発地', address: state.startAddress||'' }, sp) : null; };
+      const dayPlace = (date, kind) => { const o = state.dayPlaces[date]; const q = o && o[kind]; return (q && isNum(q.lat) && isNum(q.lng)) ? { lat:Number(q.lat), lng:Number(q.lng), label: q.label || q.address || '', address: q.address || '' } : null; };
+      const isTravelOnly = date => !!(state.dayPlaces[date] && state.dayPlaces[date].travelOnly);
+      function resolveStart(dates, i){ const own = dayPlace(dates[i], 'start'); if (own) return own; if (i > 0){ const pe = resolveEnd(dates, i-1); if (pe) return pe; } return globalStart(); }
+      function resolveEnd(dates, i){ const own = dayPlace(dates[i], 'end'); if (own) return own; return state.roundTrip ? resolveStart(dates, i) : null; }
+      const planDates = () => state.plan && state.plan.days ? state.plan.days.map(d=>d.date) : Array.from({length: Math.min(30, Math.max(1, Math.floor(Number(state.days))||1))}, (_,d)=>UI.addDays(state.startDate, d));
+      const placesFor = dates => ({ starts: dates.map((_,i)=>resolveStart(dates,i)), ends: dates.map((_,i)=>resolveEnd(dates,i)), travelOnly: dates.map(d=>isTravelOnly(d)) });
 
       /* ===== 1. 訪問先リスト ===== */
       const listEl = h('div');
@@ -435,7 +460,7 @@
         buildBtn.disabled = true; progress.textContent = '日ごとに振り分け中…';
         try {
           const stops = ready.map(r=>({ key:r.key, label: rowLabel(r), name:r.name, company:r.company, address:r.address, lat:Number(r.lat), lng:Number(r.lng), stayMin: r.stayMin || settings.defaultStayMin || 45, customerId:r.customerId, memo:r.memo, date:r.date||'', timeFrom:r.timeFrom||'', timeTo:r.timeTo||'' }));
-          const res = await buildPlan(start, stops, state);
+          const res = await buildPlan(start, stops, state, placesFor(Array.from({length: state.days}, (_,d)=>UI.addDays(state.startDate, d))));
           state.plan = { days: res.days, unassigned: res.unassigned, itins:{} };
           saveDraft(); await computeAll(); renderPlan();
           toast(`${res.days.length}日分の計画を作成しました${res.unassigned.length?`(${res.unassigned.length}件は日数内に入りませんでした)`:''}${skipped?`(座標なし ${skipped}件は除外)`:''}`, {ms:5000});
@@ -447,16 +472,48 @@
       /* ===== 3. 日ごとの計画 ===== */
       const planEl = h('div');
       async function computeAll(){
-        const start = startPt(); if (!start){ toast('出発地の座標が未設定です。「2. 計画の条件」で出発地を設定してください', {error:true}); return; }
-        for (const day of state.plan.days){ state.plan.itins[day.date] = await itinerary(start, day, state); }
+        const dates = state.plan.days.map(d=>d.date);
+        for (let i = 0; i < state.plan.days.length; i++){
+          const day = state.plan.days[i]; const s = resolveStart(dates, i);
+          if (!s){ toast(`${i+1}日目の出発地が決まりません。「2. 計画の条件」の出発地か、その日の出発地を設定してください`, {error:true}); delete state.plan.itins[day.date]; continue; }
+          state.plan.itins[day.date] = await itinerary(s, resolveEnd(dates, i), day, state);
+        }
         saveDraft();
       }
-      async function recompute(day){ const start = startPt(); if (!start){ toast('出発地の座標が未設定です', {error:true}); return; } state.plan.itins[day.date] = await itinerary(start, day, state); saveDraft(); renderPlan(); }
+      async function recompute(day){ const dates = state.plan.days.map(d=>d.date); const i = dates.indexOf(day.date); const s = resolveStart(dates, i); if (!s){ toast('その日の出発地が決まりません', {error:true}); return; } state.plan.itins[day.date] = await itinerary(s, resolveEnd(dates, i), day, state); saveDraft(); renderPlan(); }
+      /* 日ごとの出発地・帰着地の変更 */
+      async function editPlace(date, kind, di){
+        const cur = dayPlace(date, kind); const label = kind === 'start' ? '出発地' : '帰着地(その日の宿)';
+        const inp = h('input',{type:'text', value: cur ? (cur.address || cur.label) : '', placeholder:'ホテル名・住所・駅名(例: 청주 ○○호텔)'});
+        const note = h('div',{class:'small muted'}, kind === 'start' ? '未設定なら、前日の帰着地(初日は全体の出発地)から出発します。' : '未設定なら、「出発地に戻る」が有効ならその日の出発地へ、無効なら最終訪問先で終わります。');
+        let m;
+        const apply = async(place)=>{
+          const o = Object.assign({}, state.dayPlaces[date] || {}); if (place) o[kind] = place; else delete o[kind];
+          if (Object.keys(o).length) state.dayPlaces[date] = o; else delete state.dayPlaces[date];
+          saveDraft(); m.close();
+          if (state.plan){ toast('行程を計算し直しています…'); try { await computeAll(); } catch(e){ console.warn(e); } }
+          renderPlan();
+        };
+        m = UI.modal({ title: `${di+1}日目 ${UI.fmtDate(date)} の${label}`, body: h('div',{class:'form'}, h('div',{class:'f'}, h('label',null, label), inp), note),
+          actions:[ {label:'キャンセル', onClick:()=>{}}, ...(cur ? [{label:'既定に戻す', onClick:()=>{ apply(null); return false; }}] : []),
+            {label:'設定', cls:'primary', onClick: async()=>{ const a = inp.value.trim(); if (!a){ toast('場所を入力してください', {error:true}); return false; } let g = null; try { g = await Geo.geocode(a); } catch(e){} if (!g){ toast('場所が見つかりませんでした。別の表記(ホテル名・駅名など)で試してください', {error:true}); return false; } apply({ address: a, label: a, lat: g.lat, lng: g.lng }); return false; }} ] });
+        setTimeout(()=>inp.focus(), 50);
+      }
+      async function setTravelOnly(day, on){
+        const o = Object.assign({}, state.dayPlaces[day.date] || {}); if (on) o.travelOnly = true; else delete o.travelOnly;
+        if (Object.keys(o).length) state.dayPlaces[day.date] = o; else delete state.dayPlaces[day.date];
+        if (on && day.stops.length){ state.plan.unassigned.push(...day.stops); day.stops = []; toast('この日の訪問先を未割当に移しました。別の日に入れてください', {ms:4000}); }
+        saveDraft(); try { await computeAll(); } catch(e){ console.warn(e); } renderPlan();
+      }
       /* その日の行程を地図アプリで開く。日本なら Googleマップ、韓国なら NAVER マップ(Google は韓国で車ルート案内が制限されるため)。
          NAVER はアプリの URL スキーム(経由地は5か所まで、スマホにアプリが必要)。PC では出発地→最終目的地のウェブ版リンク */
       const inKorea = p => Number(p.lat) >= 33 && Number(p.lat) <= 39 && Number(p.lng) >= 124 && Number(p.lng) <= 132;
       const isMobile = /iPhone|iPad|Android/i.test(navigator.userAgent);
-      function dayPoints(day){ const sp = startPt(); if (!sp) return []; const st = Object.assign({ label: state.startLabel||'出発地' }, sp); return [st, ...day.stops.filter(hasCoord).map(s=>({lat:Number(s.lat), lng:Number(s.lng), label:s.label||s.name||''})), ...(state.roundTrip?[st]:[])].filter(hasCoord); }
+      function dayPoints(day){
+        const dates = planDates(); const i = dates.indexOf(day.date); const sp = resolveStart(dates, i); if (!sp) return [];
+        const ep = resolveEnd(dates, i); const stops = day.stops.filter(hasCoord).map(s=>({lat:Number(s.lat), lng:Number(s.lng), label:s.label||s.name||''}));
+        return [sp, ...stops, ...((ep && (stops.length || !samePt(ep, sp))) ? [ep] : [])];
+      }
       function naverLinks(pts){
         const app = 'appname=' + encodeURIComponent(location.origin || 'eigyo-support');
         const links = [];
@@ -481,8 +538,7 @@
         UI.modal({ title:'NAVER マップで開く', body, actions:[{label:'閉じる', onClick:()=>{}}] });
       }
       function navButtons(day){
-        if (!day.stops.some(hasCoord)) return []; // 訪問のない日はボタンなし
-        const pts = dayPoints(day); if (pts.length < 2) return [];
+        const pts = dayPoints(day); if (pts.length < 2) return []; // 訪問も移動もない日はボタンなし
         const korea = pts.some(inKorea);
         const g = h('a',{class:'btn sm'+(korea?'':' primary'), href: Geo.gmapsUrl(pts.slice(0,11)), target:'_blank', rel:'noopener', title: korea ? '韓国では Google の車ルート案内が制限されます' : 'Googleマップで経路を開く(経由地は9か所まで)'}, '🗺️ Googleマップ');
         const n = h('button',{class:'btn sm'+(korea?' primary':''), title:'NAVER マップで経路を開く(韓国向け)', onClick:()=>openNaver(day)}, '🟢 NAVERマップ');
@@ -493,7 +549,7 @@
         const p = state.plan;
         if (!p){ planEl.append(UI.empty('「計画を自動作成」を押すと、ここに日ごとの訪問計画が表示されます。')); return; }
         const we = toMin(state.workEnd) ?? 1080;
-        const dayOptions = p.days.map(d=>[d.date, UI.fmtDate(d.date)]);
+        const dayOptions = p.days.filter(d=>!isTravelOnly(d.date)).map(d=>[d.date, UI.fmtDate(d.date)]);   // 移動日には移せない
         const moveTo = (fromDay, stop, toDate) => { if (!toDate || (toDate!=='__un' && !p.days.find(d=>d.date===toDate))) return; fromDay.stops = fromDay.stops.filter(s=>s!==stop); if (toDate==='__un'){ p.unassigned.push(stop); } else { p.days.find(d=>d.date===toDate).stops.push(stop); } saveDraft(); computeAll().then(renderPlan); };
         p.days.forEach((day, di)=>{
           const it = p.itins[day.date];
@@ -511,43 +567,58 @@
                 h('select',{class:'sm', title:'別の日に移す', onChange:(e)=>moveTo(day, s, e.target.value)}, [['', '移す…'], ...dayOptions.filter(o=>o[0]!==day.date), ['__un','未割当へ']].map(([v,l])=>h('option',{value:v},l))),
               )));
           });
+          const pdates = p.days.map(d=>d.date); const ds = resolveStart(pdates, di), de = resolveEnd(pdates, di); const dp = state.dayPlaces[day.date] || {};
+          const placesRow = h('div',{class:'row small', style:{gap:'6px', alignItems:'center', flexWrap:'wrap', marginBottom:'6px'}},
+            h('span',null, '出発: ', h('b',null, ds ? ds.label : '未設定'), h('span',{class:'muted'}, dp.start ? '' : ((di > 0 && resolveEnd(pdates, di-1) && !samePt(resolveEnd(pdates, di-1), globalStart())) ? '(前日の帰着地)' : '(全体の出発地)'))),
+            h('button',{class:'btn sm', style:{padding:'2px 8px'}, onClick:()=>editPlace(day.date, 'start', di)}, '変更'),
+            h('span',{style:{marginLeft:'8px'}}, '帰着: ', h('b',null, de ? de.label : 'なし(最終訪問先で終了)'), h('span',{class:'muted'}, dp.end ? '' : (de ? '(出発地に戻る)' : ''))),
+            h('button',{class:'btn sm', style:{padding:'2px 8px'}, onClick:()=>editPlace(day.date, 'end', di)}, '変更'),
+            h('label',{class:'row small', style:{gap:'4px', marginLeft:'8px', cursor:'pointer'}}, h('input',{type:'checkbox', checked: !!dp.travelOnly, onChange:(e)=>setTravelOnly(day, e.target.checked)}), '移動日(訪問なし)'));
           planEl.appendChild(h('div',{class:'card'},
-            h('h2',null, `${di+1}日目 ${UI.fmtDate(day.date)}`, h('span',{class:'small muted'}, ` ${day.stops.length}件`),
+            h('h2',null, `${di+1}日目 ${UI.fmtDate(day.date)}`, h('span',{class:'small muted'}, dp.travelOnly ? ' 移動日' : ` ${day.stops.length}件`),
               it ? h('span',{class:'small '+(over?'text-danger':'muted'), style:{marginLeft:'auto'}}, `${it.distanceKm.toFixed(1)}km / 移動${UI.fmtMin(it.durationMin)} / 終了 ${fmtT(it.end)}${it.estimated?'(推定)':''}${over?' ⚠ 業務終了を超過':''}`) : null),
             (day.warnings||[]).length ? h('div',{class:'notice text-danger small'}, day.warnings.map(w=>h('div',null,'⚠ '+w))) : null,
-            day.stops.length ? list : h('div',{class:'small muted'}, 'この日は訪問なし'),
+            placesRow,
+            it && it.travel ? h('div',{class:'small', style:{marginBottom:'6px'}}, `🚗 移動 ${it.travel.from} → ${it.travel.to} ・ ${UI.fmtMin(it.travel.min)}${it.travel.km ? ` (${it.travel.km.toFixed(1)}km)` : ''}${it.estimated ? '(推定)' : ''}`) : null,
+            dp.travelOnly && !(ds && de && !samePt(ds, de)) ? h('div',{class:'small text-warn', style:{marginBottom:'6px'}}, '移動日です。「帰着」で次の宿を設定すると移動の行程が出ます(未設定なら出発地と同じ場所に留まる扱い)') : null,
+            day.stops.length ? list : h('div',{class:'small muted'}, dp.travelOnly ? '移動日(訪問なし)' : 'この日は訪問なし'),
             h('div',{class:'row mt'},
-              h('button',{class:'btn sm', onClick: async()=>{ const start = startPt(); if (!start){ toast('出発地の座標が未設定です', {error:true}); return; } try { const r = await Geo.optimize(start, day.stops, {roundTrip:state.roundTrip}); day.stops = r.stops; await recompute(day); toast('並べ直しました'); } catch(e){ toast(e.message,{error:true}); } }}, '✨ この日を最適化'),
+              h('button',{class:'btn sm', onClick: async()=>{ if (!ds){ toast('その日の出発地が決まりません', {error:true}); return; } try { const r = await Geo.optimize(ds, day.stops, { roundTrip: !!de && samePt(de, ds), end: de && !samePt(de, ds) ? de : null }); day.stops = r.stops; await recompute(day); toast('並べ直しました'); } catch(e){ toast(e.message,{error:true}); } }}, '✨ この日を最適化'),
               ...navButtons(day),
               h('a',{class:'btn sm', href:`#/route?date=${day.date}`}, '🚗 ルート画面(反映後)'))
           ));
         });
         /* 全日程を1枚の地図に(日ごとに色分け) */
-        if (MapKit.available() && p.days.some(d=>d.stops.some(hasCoord))){
+        const pd0 = p.days.map(d=>d.date);
+        if (MapKit.available() && p.days.some((d,i)=>d.stops.some(hasCoord) || (resolveStart(pd0,i) && resolveEnd(pd0,i) && !samePt(resolveStart(pd0,i), resolveEnd(pd0,i))))){
           const mapEl = h('div',{class:'map', style:{height:'480px'}});
-          const legend = h('div',{class:'row small mt', style:{gap:'10px', flexWrap:'wrap'}}, p.days.map((d,i)=>h('span',{class:'row', style:{gap:'4px', alignItems:'center'}}, h('span',{style:{display:'inline-block', width:'12px', height:'12px', borderRadius:'50%', background:dayColor(i)}}), `${i+1}日目 ${UI.fmtDate(d.date)}(${d.stops.length}件)`)), h('span',{class:'muted'}, 'S = 出発地。点線 = 道路経路が取れず直線で推定'));
+          const legend = h('div',{class:'row small mt', style:{gap:'10px', flexWrap:'wrap'}}, p.days.map((d,i)=>h('span',{class:'row', style:{gap:'4px', alignItems:'center'}}, h('span',{style:{display:'inline-block', width:'12px', height:'12px', borderRadius:'50%', background:dayColor(i)}}), `${i+1}日目 ${UI.fmtDate(d.date)}(${d.stops.length}件)`)), h('span',{class:'muted'}, 'S = 出発地・帰着地(宿)。点線 = 道路経路が取れず直線で推定'));
           planEl.appendChild(h('div',{class:'card'}, h('h2',null, '全日程の地図'), mapEl, legend));
           setTimeout(async()=>{
             try {
               const m = await MapKit.create(mapEl, {scrollWheelZoom:false});
               if (!m){ legend.textContent = '地図を表示できませんでした'; return; }
               const pts = [];
-              const start = startPt();
-              if (start){ m.marker(start, { text:'S', cls:'start', popup: h('div',null, h('b',null, state.startLabel||'出発地'), h('div',{class:'small muted'}, state.startAddress||'')) }); pts.push([start.lat, start.lng]); }
+              const pdates = p.days.map(d=>d.date);
+              // 出発地・帰着地(日ごとに違ってよい)。同じ地点は1つのピンにまとめ、吹き出しに役割を列挙
+              const anchors = [];
+              p.days.forEach((d, di)=>{ const s = resolveStart(pdates, di), e = resolveEnd(pdates, di); [[s, `${di+1}日目 出発`], [e, `${di+1}日目 帰着`]].forEach(([q, role])=>{ if (!q) return; let a = anchors.find(x=>samePt(x, q)); if (!a){ a = { lat:q.lat, lng:q.lng, label:q.label, address:q.address||'', roles:[] }; anchors.push(a); } a.roles.push(role); }); });
+              anchors.forEach((a, k)=>{ m.marker(a, { text: anchors.length > 1 ? `S${k+1}` : 'S', cls:'start', popup: h('div',null, h('b',null, a.label||'出発地'), h('div',{class:'small muted'}, a.address||''), h('div',{class:'small'}, a.roles.join(' / ')), placeLinks(a)) }); pts.push([a.lat, a.lng]); });
               p.days.forEach((d, di)=>{
-                const it = p.itins[d.date]; const col = dayColor(di);
-                if (!d.stops.some(hasCoord)) return; // 訪問のない日は線を引かない
+                const it = p.itins[d.date]; const col = dayColor(di); const ds = resolveStart(pdates, di), de = resolveEnd(pdates, di);
+                const hasVisit = d.stops.some(hasCoord), hasMove = !!(ds && de && !samePt(ds, de));
+                if (!hasVisit && !hasMove) return; // 訪問も移動もない日は線を引かない
                 const g0 = it && it.geometry && it.geometry.length > 1 ? it.geometry[0] : null;
-                const stale = !start || !g0 || Geo.haversineKm(start, {lat:g0[0], lng:g0[1]}) > 50; // 出発地なし/変更前に計算した経路線は使わない
+                const stale = !ds || !g0 || Geo.haversineKm(ds, {lat:g0[0], lng:g0[1]}) > 50; // 出発地なし/変更前に計算した経路線は使わない
                 if (!stale){ m.line(it.geometry, { color:col, weight:4, opacity:.75, dashed: !!it.estimated }); }
-                else { const line = [start, ...d.stops.filter(hasCoord), ...(state.roundTrip?[start]:[])].filter(q=>q && hasCoord(q)).map(q=>[Number(q.lat),Number(q.lng)]); if (line.length > 1) m.line(line, { color:col, weight:3, opacity:.6, dashed:true }); }
+                else { const line = [ds, ...d.stops.filter(hasCoord), ...(de ? [de] : [])].filter(q=>q && hasCoord(q)).map(q=>[Number(q.lat),Number(q.lng)]); if (line.length > 1) m.line(line, { color:col, weight:3, opacity:.6, dashed:true }); }
                 d.stops.forEach((st, i)=>{ if (!hasCoord(st)) return; const row = it?.rows?.[i];
                   m.marker(st, { text:i+1, color:col, popup: h('div',null, h('b',null, st.label||''), st.name ? h('div',{class:'small'}, st.name) : null, h('div',{class:'small muted'}, `${di+1}日目 ${UI.fmtDate(d.date)}${row ? ' ' + fmtT(row.arr) + ' 着' : ''}`), h('div',{class:'small muted'}, st.address||''), placeLinks(st)) });
                   pts.push([Number(st.lat), Number(st.lng)]); });
               });
               m.invalidate();
               m.fit(pts);
-              if (!start) legend.appendChild(h('div',{class:'text-danger', style:{width:'100%'}}, '⚠ 出発地が未設定のため経路線は表示していません。「2. 計画の条件」で出発地を設定すると行程を計算し直します。'));
+              if (!anchors.length) legend.appendChild(h('div',{class:'text-danger', style:{width:'100%'}}, '⚠ 出発地が未設定のため経路線は表示していません。「2. 計画の条件」で出発地を設定すると行程を計算し直します。'));
             } catch(e){ console.warn('plan map failed', e); legend.textContent = '地図の表示に失敗しました: ' + (e.message||e); }
           }, 60);
         }
@@ -565,11 +636,13 @@
       }
       function planText(){
         const p = state.plan; if (!p) return '';
-        return p.days.map((d,i)=>{ const it = p.itins[d.date]; return `■${i+1}日目 ${UI.fmtDateLong(d.date)}\n` + d.stops.map((s,j)=>{ const r = it?.rows?.[j]; return `${j+1}. ${r?fmtT(r.arr)+'-'+fmtT(r.dep)+' ':''}${s.label}${s.name?' / '+s.name:''}${s.address?' ('+s.address+')':''}`; }).join('\n') + (it?`\n  合計 ${it.distanceKm.toFixed(1)}km / 移動 ${UI.fmtMin(it.durationMin)}`:''); }).join('\n\n');
+        const pdates = p.days.map(d=>d.date);
+        return p.days.map((d,i)=>{ const it = p.itins[d.date]; const ds = resolveStart(pdates, i), de = resolveEnd(pdates, i); const head = `■${i+1}日目 ${UI.fmtDateLong(d.date)}${ds ? `  出発: ${ds.label}` : ''}${de ? ` → 帰着: ${de.label}` : ''}\n` + (it && it.travel ? `  移動 ${it.travel.from} → ${it.travel.to} ${UI.fmtMin(it.travel.min)}\n` : ''); return head + d.stops.map((s,j)=>{ const r = it?.rows?.[j]; return `${j+1}. ${r?fmtT(r.arr)+'-'+fmtT(r.dep)+' ':''}${s.label}${s.name?' / '+s.name:''}${s.address?' ('+s.address+')':''}`; }).join('\n') + (it?`\n  合計 ${it.distanceKm.toFixed(1)}km / 移動 ${UI.fmtMin(it.durationMin)}`:''); }).join('\n\n');
       }
       async function applyPlan(){
-        if (!startPt()){ toast('出発地の座標が未設定です。「2. 計画の条件」で出発地を設定してから反映してください', {error:true}); return; }
         const p = state.plan; if (!p) return;
+        const pdates0 = p.days.map(d=>d.date);
+        if (p.days.some((d,i)=>!resolveStart(pdates0, i))){ toast('出発地が決まらない日があります。「2. 計画の条件」で出発地を設定してから反映してください', {error:true}); return; }
         const total = p.days.reduce((a,d)=>a+d.stops.length,0);
         const existing = p.days.flatMap(d=>Store.where('events', e=>e.date===d.date && e.type==='visit'));
         const planKey = state.savedId || state.id; // 保存した計画なら保存IDで予定を紐付ける(別の計画や別端末の予定を消さない・重複させない)
@@ -593,8 +666,12 @@
             Store.save('events', { date: day.date, start: r?fmtT(r.arr).slice(0,5):'', end: r?fmtT(Math.min(r.dep, 1439)).slice(0,5):'', title: `${s.label} 訪問`, type:'visit', customerId: cid||'', address: s.address||'', lat:s.lat, lng:s.lng, memo: s.memo||'', status:'planned', attachmentIds:[], planId });
             ev++;
           });
-          if (!day.stops.length) continue;
-          Store.save('routes', { planId, date: day.date, name:`営業計画 ${UI.fmtDate(day.date)}`, startLabel: state.startLabel||'出発地', startAddress: state.startAddress, startLat: (startPt()||{}).lat ?? null, startLng: (startPt()||{}).lng ?? null, roundTrip: state.roundTrip, departTime: state.workStart,
+          const di = p.days.indexOf(day); const ds = resolveStart(pdates0, di), de = resolveEnd(pdates0, di);
+          if (!day.stops.length){
+            if (it && it.travel){ const ws0 = toMin(state.workStart) ?? 540; Store.save('events', { date: day.date, start: fmtT(ws0).slice(0,5), end: fmtT(Math.min(ws0 + it.travel.min, 1439)).slice(0,5), title: `移動 ${it.travel.from} → ${it.travel.to}`, type:'move', customerId:'', address: de ? (de.address||de.label||'') : '', lat: de ? de.lat : null, lng: de ? de.lng : null, memo: `営業計画の移動日(${UI.fmtMin(it.travel.min)}${it.travel.km ? ` / ${it.travel.km.toFixed(1)}km` : ''})`, status:'planned', attachmentIds:[], planId }); ev++; }
+            continue;
+          }
+          Store.save('routes', { planId, date: day.date, name:`営業計画 ${UI.fmtDate(day.date)}`, startLabel: ds ? ds.label : (state.startLabel||'出発地'), startAddress: ds ? ds.address : state.startAddress, startLat: ds ? ds.lat : null, startLng: ds ? ds.lng : null, roundTrip: !!(de && ds && samePt(de, ds)), departTime: state.workStart,
             stops: day.stops.map(s=>({ customerId:s.customerId||'', label:s.label, address:s.address, lat:s.lat, lng:s.lng, stayMin:stay(s) })), distanceKm: Math.round((it?.distanceKm||0)*10)/10, durationMin: Math.round(it?.durationMin||0) });
         }
         saveDraft();
@@ -651,7 +728,7 @@
       }
 
       /* ===== 保存した計画(全員で共有。端末内の下書きとは別) ===== */
-      const SAVE_KEYS = ['rows','filter','onlyNew','startDate','days','workStart','workEnd','roundTrip','startAddress','startLat','startLng','startLabel'];
+      const SAVE_KEYS = ['rows','filter','onlyNew','startDate','days','workStart','workEnd','roundTrip','startAddress','startLat','startLng','startLabel','dayPlaces'];
       function snapshot(name){
         const o = { name };
         SAVE_KEYS.forEach(k=>{ o[k] = JSON.parse(JSON.stringify(state[k] === undefined ? null : state[k])); });

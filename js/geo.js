@@ -125,12 +125,13 @@
   }
   /* Optimize visiting order. start: {lat,lng}; stops: [{lat,lng,...}]; returns {order:[idx], stops:[...]}.
      Nearest neighbor + 2-opt on time matrix. If roundTrip, returns to start. */
-  async function optimize(start, stops, {roundTrip=false, fixedLast=false}={}){
+  async function optimize(start, stops, {roundTrip=false, fixedLast=false, end=null}={}){
+    // end: 帰着地(出発地と別の場所に帰る日)。指定があれば roundTrip より優先
     if (!stops.length) return { order:[], stops:[] };
-    const pts = [start, ...stops];
+    const pts = [start, ...stops]; if (end) pts.push(end);
     const M = await matrix(pts);
-    const n = stops.length;
-    const cost = (order)=>{ let c=M[0][order[0]+1]; for(let i=1;i<order.length;i++) c+=M[order[i-1]+1][order[i]+1]; if(roundTrip) c+=M[order[order.length-1]+1][0]; return c; };
+    const n = stops.length, E = n + 1;
+    const cost = (order)=>{ let c=M[0][order[0]+1]; for(let i=1;i<order.length;i++) c+=M[order[i-1]+1][order[i]+1]; if(end) c+=M[order[order.length-1]+1][E]; else if(roundTrip) c+=M[order[order.length-1]+1][0]; return c; };
     // nearest neighbor
     let remaining = Array.from({length:n},(_,i)=>i);
     let last = null;
