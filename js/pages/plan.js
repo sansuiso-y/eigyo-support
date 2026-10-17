@@ -537,7 +537,7 @@
                 else { const line = [start, ...d.stops.filter(hasCoord), ...(state.roundTrip?[start]:[])].filter(hasCoord).map(q=>[Number(q.lat),Number(q.lng)]); if (line.length > 1) L.polyline(line, {color:col, weight:3, opacity:.6, dashArray:'8 8'}).addTo(map); }
                 d.stops.forEach((st, i)=>{ if (!hasCoord(st)) return; const row = it?.rows?.[i];
                   L.marker([Number(st.lat), Number(st.lng)], {icon: L.divIcon({className:'num-marker', html:`<span style="background:${col}">${i+1}</span>`, iconSize:[26,26], iconAnchor:[13,13], popupAnchor:[0,-12]})}).addTo(map)
-                    .bindPopup(h('div',null, h('b',null, st.label||''), st.name ? h('div',{class:'small'}, st.name) : null, h('div',{class:'small muted'}, `${di+1}日目 ${UI.fmtDate(d.date)}${row ? ' ' + fmtT(row.arr) + ' 着' : ''}`), h('div',{class:'small muted'}, st.address||'')));
+                    .bindPopup(h('div',null, h('b',null, st.label||''), st.name ? h('div',{class:'small'}, st.name) : null, h('div',{class:'small muted'}, `${di+1}日目 ${UI.fmtDate(d.date)}${row ? ' ' + fmtT(row.arr) + ' 着' : ''}`), h('div',{class:'small muted'}, st.address||''), placeLinks(st)));
                   pts.push([Number(st.lat), Number(st.lng)]); });
               });
               map.invalidateSize();
@@ -604,6 +604,18 @@
       }
 
       /* ===== 描画 ===== */
+      /* 1か所を地図アプリで開くリンク(吹き出し用)。Google は座標検索、NAVER はスマホならアプリ(nmap://place)、PC ならウェブ版の検索 */
+      function placeLinks(p){
+        const lat = Number(p.lat), lng = Number(p.lng), name = p.label || p.company || p.name || '';
+        const g = `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
+        const mobile = /iPhone|iPad|Android/i.test(navigator.userAgent);
+        const n = mobile ? `nmap://place?lat=${lat}&lng=${lng}&name=${encodeURIComponent(name)}&appname=${encodeURIComponent(location.origin || 'eigyo-support')}`
+                         : `https://map.naver.com/p/search/${encodeURIComponent(p.address || name)}`;
+        return h('div',{class:'row small', style:{gap:'8px', marginTop:'6px'}},
+          h('a',{href:g, target:'_blank', rel:'noopener'}, '🗺️ Googleマップ'),
+          h('a',{href:n, target: mobile ? '_self' : '_blank', rel:'noopener'}, '🟢 NAVERマップ'));
+      }
+
       /* ===== 訪問先を地図で見る ===== */
       function showMap(focus){
         if (typeof L === 'undefined'){ toast('地図ライブラリを読み込めませんでした(通信状況を確認してください)', {error:true}); return; }
@@ -611,7 +623,7 @@
         const withPos = list.filter(hasCoord), noPos = list.filter(r=>!hasCoord(r));
         if (!withPos.length && !(focus && hasCoord(focus))){ toast('座標のある訪問先がありません。「選択行の座標を取得」を先に押してください', {error:true}); return; }
         const mapEl = h('div',{class:'map', style:{height:'62vh'}});
-        const legend = h('div',{class:'small muted mt'}, `● 番号は表の並び順。S は出発地。` + (noPos.length ? ` 座標がなく地図に出ていない: ${noPos.map(r=>r.company||r.name).filter(Boolean).slice(0,8).join('、')}${noPos.length>8?' ほか':''}` : ''));
+        const legend = h('div',{class:'small muted mt'}, `● 番号は表の並び順。S は出発地。ピンを押すと Googleマップ / NAVERマップ で場所を開けます。日ごとの経路を開くボタンは「計画を自動作成」後の各日のカードにあります。` + (noPos.length ? ` 座標がなく地図に出ていない: ${noPos.map(r=>r.company||r.name).filter(Boolean).slice(0,8).join('、')}${noPos.length>8?' ほか':''}` : ''));
         UI.modal({ title: focus ? `${focus.company||focus.name||'訪問先'} の場所` : `訪問先の地図(${withPos.length}件)`, wide:true, body: h('div',null, mapEl, legend), actions:[{label:'閉じる', onClick:()=>{}}] });
         setTimeout(()=>{
           try {
@@ -621,7 +633,7 @@
             const mk = (p, text, cls, popup) => { const m = L.marker([Number(p.lat), Number(p.lng)], {icon: L.divIcon({className:'num-marker'+(cls?' '+cls:''), html:String(text), iconSize:[26,26], iconAnchor:[13,13], popupAnchor:[0,-12]})}).addTo(map); m.bindPopup(popup); pts.push([Number(p.lat), Number(p.lng)]); return m; };
             if (Number.isFinite(Number(state.startLat)) && Number.isFinite(Number(state.startLng)) && state.startLat !== null && state.startLat !== '') mk({lat:state.startLat, lng:state.startLng}, 'S', 'start', h('div',null, h('b',null, state.startLabel||'出発地'), h('div',{class:'small muted'}, state.startAddress||'')));
             let focusMarker = null;
-            withPos.forEach(r=>{ const i = list.indexOf(r)+1; const m = mk(r, i, r===focus?'start':'', h('div',null, h('b',null, r.company||''), r.name ? h('div',{class:'small'}, r.name) : null, h('div',{class:'small muted'}, r.address||''), r.geoNote ? h('div',{class:'small text-warn'}, '⚠ 要確認: '+r.geoNote) : null)); if (r===focus) focusMarker = m; });
+            withPos.forEach(r=>{ const i = list.indexOf(r)+1; const m = mk(r, i, r===focus?'start':'', h('div',null, h('b',null, r.company||''), r.name ? h('div',{class:'small'}, r.name) : null, h('div',{class:'small muted'}, r.address||''), r.geoNote ? h('div',{class:'small text-warn'}, '⚠ 要確認: '+r.geoNote) : null, placeLinks(r))); if (r===focus) focusMarker = m; });
             map.invalidateSize();
             if (focus && hasCoord(focus)){ map.setView([Number(focus.lat), Number(focus.lng)], 16); if (focusMarker) focusMarker.openPopup(); }
             else if (pts.length === 1) map.setView(pts[0], 15);
