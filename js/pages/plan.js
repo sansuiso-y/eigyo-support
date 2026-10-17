@@ -233,8 +233,9 @@
       const progress = h('div',{class:'small muted'});
       async function importFiles(files){
         let added = 0;
-        for (const f0 of Array.from(files||[])){
+        for (let f0 of Array.from(files||[])){
           try {
+            if (UI.isHeic(f0)){ progress.textContent = 'iPhone の写真(HEIC)を変換中…'; f0 = await UI.toJpeg(f0); }
             const ext = (f0.name||'').split('.').pop().toLowerCase();
             let rows = [];
             if (ext==='csv' || ext==='txt' || f0.type==='text/csv'){ rows = rowsFromTable(await parseCsv(await readText(f0))); }

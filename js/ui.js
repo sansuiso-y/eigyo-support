@@ -140,6 +140,18 @@
     setTimeout(()=>{ w.print(); }, 400);
   }
 
-  window.UI = { h, append, clear, toast, modal, confirm, prompt, field, input, select, textarea, readForm, badge, empty, download, copy, debounce, printElement,
+  /* iPhone の HEIC/HEIF 写真を JPEG に直す(サーバーで変換)。ブラウザは HEIC を表示・切り出しできないため。
+     HEIC でなければそのまま返す。変換に失敗したら元のファイルを返す(AI 読み取り自体は HEIC でもできる) */
+  const isHeic = f => /^image\/hei[cf]$/i.test(f.type||'') || /\.(heic|heif)$/i.test(f.name||'');
+  async function toJpeg(file){
+    if (!file || !isHeic(file)) return file;
+    try {
+      const res = await fetch('api/convert', { method:'POST', headers:{ 'Content-Type': file.type || 'image/heic' }, body: file });
+      if (!res.ok){ let j=null; try { j = await res.json(); } catch(e){} console.warn('heic convert failed', (j&&j.error)||res.status); return file; }
+      const blob = await res.blob();
+      return new File([blob], (file.name||'photo').replace(/\.(heic|heif)$/i,'')+'.jpg', { type:'image/jpeg', lastModified: file.lastModified });
+    } catch(e){ console.warn('heic convert failed', e); return file; }
+  }
+  window.UI = { h, append, clear, toast, modal, confirm, prompt, field, input, select, textarea, readForm, badge, empty, download, copy, debounce, printElement, toJpeg, isHeic,
     today, toISODate, parseDate, fmtDate, fmtDateLong, fmtDateTime, fmtYen, fmtMin, fmtBytes, addDays, diffDays, escapeHtml, DOW, pad, uid: ()=>Store.uid() };
 })();

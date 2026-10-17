@@ -24,7 +24,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const AI = require('./ai');            // 写真/PDFの読み取り・AI注文(GEMINI_API_KEY 設定時のみ)
-
+const Convert = require('./convert.js');
 const ROOT = __dirname;
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(ROOT, 'data'));
 const FILES_DIR = path.join(DATA_DIR, 'files');
@@ -231,6 +231,7 @@ const server = http.createServer((req, res)=>{
     if (url.pathname.startsWith('/api/')){
       if (await Auth.handleApi(req, res, url, { readBody, send })) return;
       if (await AI.handle(req, res, url, { readBody, send })) return;
+      if (await Convert.handle(req, res, url, { readBody, send })) return;
       return api(req, res, url);
     }
     return serveStatic(req, res, url);

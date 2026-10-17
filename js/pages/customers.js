@@ -339,8 +339,9 @@
           }
         }
         async function addFiles(files){
-          for (const f of Array.from(files||[])){
+          for (let f of Array.from(files||[])){
             if (!f.type.startsWith('image/') && !/\.(heic|heif)$/i.test(f.name)) { toast(`${f.name}: 画像ではありません`, {error:true}); continue; }
+            if (UI.isHeic(f)){ toast(`${f.name}: iPhone の写真(HEIC)を変換しています…`, {ms:4000}); f = await UI.toJpeg(f); if (UI.isHeic(f)) toast(`${f.name}: HEIC を変換できませんでした。写真の表示と切り出しはできませんが、読み取りは試します`, {error:true, ms:6000}); }
             items.push({ key: UI.uid(), file: f, url: URL.createObjectURL(f), card: null, checked: true, dup: null, status: 'pending', error: '' });
           }
           fileInp.value=''; camInp.value='';
@@ -432,9 +433,10 @@
 
         const preview = h('img',{class:'card-img', alt:'名刺', style:{display:'none'}});
         if (data.cardImageId) Files.url(data.cardImageId).then(u=>{ if (u){ preview.src = u; preview.style.display = ''; } }).catch(()=>{});
-        const onPick = (inp)=>()=>{
-          const f = inp.files && inp.files[0]; if (!f) return;
-          if (!f.type.startsWith('image/')){ toast('画像ファイルを選択してください', {error:true}); inp.value=''; return; }
+        const onPick = (inp)=>async()=>{
+          let f = inp.files && inp.files[0]; if (!f) return;
+          if (!f.type.startsWith('image/') && !UI.isHeic(f)){ toast('画像ファイルを選択してください', {error:true}); inp.value=''; return; }
+          if (UI.isHeic(f)){ toast('iPhone の写真(HEIC)を変換しています…', {ms:4000}); f = await UI.toJpeg(f); }
           pendingFile = f; removeImage = false;
           if (previewUrl) URL.revokeObjectURL(previewUrl);
           previewUrl = URL.createObjectURL(f); preview.src = previewUrl; preview.style.display = '';

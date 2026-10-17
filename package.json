@@ -1,0 +1,12 @@
+{
+  "name": "eigyo-support",
+  "version": "1.0.0",
+  "private": true,
+  "description": "営業サポート(山水荘)",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": {
+    "heic-decode": "^2.0.0",
+    "jpeg-js": "^0.4.4"
+  }
+}

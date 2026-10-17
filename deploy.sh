@@ -43,7 +43,7 @@ gcloud run deploy $SERVICE \
   --region=$REGION \
   --allow-unauthenticated \
   --min-instances=0 --max-instances=1 \
-  --memory=512Mi \
+  --memory=1Gi \
   --timeout=300 \
   --set-env-vars=DATA_DIR=/data,TRUST_PROXY=1,AUTH_REQUIRED=1 \
   --set-secrets=SETUP_CODE=$SETUP_SECRET:latest,SESSION_SECRET=$SESSION_SECRET_NAME:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest \
