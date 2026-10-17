@@ -453,7 +453,7 @@
         const text = aiBox.value.trim(); if (!text){ toast('注文を入力してください'); return; }
         aiBtn.disabled = true; aiMsg.textContent = 'AIが読み取り中…';
         try {
-          const res = await fetch('api/assist', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ instruction:text, startDate:state.startDate, days:state.days, workStart:state.workStart, workEnd:state.workEnd,
+          const res = await fetch('api/assist', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ instruction:text, startDate:state.startDate, days:state.days, workStart:state.workStart, workEnd:state.workEnd, homeNames:[Store.settings().company||''].filter(Boolean),   // 自社名(経路の「山水荘→…」が渡航日か帰国日かの判定に使う)
             rows: state.rows.map(r=>({ key:r.key, company:r.company, name:r.name, category:r.category, address:r.address, checked:r.checked, date:r.date, timeFrom:r.timeFrom, timeTo:r.timeTo })) }) });
           let j=null; try { j = await res.json(); } catch(e){}
           if (!res.ok) throw new Error((j&&j.error)||`失敗 (${res.status})`);
@@ -472,11 +472,13 @@
           // 移動の日程(渡航日・宿・開始時刻)を日ごとの設定に反映。場所名は住所検索で座標にする(見つからなければ名前だけ残して知らせる)
           const dp = Array.isArray(j.dayPlans) ? j.dayPlans : []; let dn = 0, moved = 0; const miss = [];
           const home = globalStart();
-          const findPlace = async(name)=>{
+          const findPlace = async(name, query)=>{
             if (!name) return null;
             const co = Store.settings().company || '', ha = Store.settings().homeAddress || '';
             if (home && ((co && (name === co || co.includes(name) || name.includes(co))) || name === state.startLabel || (state.startAddress && name === state.startAddress) || (ha && ha.includes(name)))) return { lat: home.lat, lng: home.lng, address: home.address, label: name };   // 自社・拠点の名前は設定の座標を使う(地図検索だと同名の別施設に飛ぶ)
-            let g = null; try { g = await Geo.geocode(name); } catch(e){}
+            let g = null;
+            if (query && query !== name){ try { g = await Geo.geocode(query); } catch(e){} if (g) return { address: query, label: name, lat: g.lat, lng: g.lng }; }   // AIが付けた現地表記(인천국제공항 など)で先に探す
+            try { g = await Geo.geocode(name); } catch(e){}
             if (g) return { address: name, label: name, lat: g.lat, lng: g.lng };
             // 地図検索で見つからない名前(日本語表記のホテル名など)は、AIのWeb検索で住所を調べてから座標にする
             try {
@@ -491,10 +493,10 @@
             if (d.travelOnly !== undefined){ if (d.travelOnly) o.travelOnly = true; else delete o.travelOnly; }
             if (d.startTime) o.startTime = d.startTime;
             if (d.memo) o.memo = d.memo;
-            for (const [k, nm] of [['start', d.startPlace], ['end', d.endPlace]]){
+            for (const [k, nm, q] of [['start', d.startPlace, d.startQuery], ['end', d.endPlace, d.endQuery]]){
               if (!nm) continue;
               aiMsg.textContent = `場所を調べています: ${nm}…`;
-              const pl = await findPlace(nm);
+              const pl = await findPlace(nm, q);
               if (pl) o[k] = pl; else { miss.push(`${UI.fmtDate(d.date)} の${k==='start'?'出発地':'帰着地'}「${nm}」`); }
             }
             const before = JSON.stringify(state.dayPlaces[d.date] || {});
@@ -681,18 +683,20 @@
             h('label',{class:'row small', style:{gap:'4px', marginLeft:'8px', cursor:'pointer'}}, h('input',{type:'checkbox', checked: !!dp.travelOnly, onChange:(e)=>setTravelOnly(day, e.target.checked)}), '移動日(訪問なし)'));
           planEl.appendChild(h('div',{class:'card'},
             h('h2',null, `${di+1}日目 ${UI.fmtDate(day.date)}`, h('span',{class:'small muted'}, dp.travelOnly ? ' 移動日' : ` ${day.stops.length}件`),
-              it && !(it.travel && it.travel.flight) ? h('span',{class:'small '+(over?'text-danger':'muted'), style:{marginLeft:'auto'}}, `${it.distanceKm.toFixed(1)}km / 移動${UI.fmtMin(it.durationMin)} / 終了 ${fmtT(it.end)}${it.estimated?'(推定)':''}${over?' ⚠ 業務終了を超過':''}`) : null),
+              it && !(it.travel && it.travel.flight) ? h('span',{class:'small '+(over?'text-danger':'muted'), style:{marginLeft:'auto'}}, dp.travelOnly ? `${it.distanceKm.toFixed(1)}km / 移動${UI.fmtMin(it.durationMin)}${it.estimated?'(推定)':''}` : `${it.distanceKm.toFixed(1)}km / 移動${UI.fmtMin(it.durationMin)} / 終了 ${fmtT(it.end)}${it.estimated?'(推定)':''}${over?' ⚠ 業務終了を超過':''}`) : null),
             (day.warnings||[]).length ? h('div',{class:'notice text-danger small'}, day.warnings.map(w=>h('div',null,'⚠ '+w))) : null,
             placesRow,
-            dp.memo ? h('div',{class:'small', style:{marginBottom:'6px'}}, `📝 ${dp.memo}`) : null,
+            dp.memo ? (/→|->/.test(dp.memo)
+              ? h('div',{class:'row small', style:{gap:'4px', alignItems:'center', flexWrap:'wrap', marginBottom:'6px'}}, h('span',null,'🧭 経路:'), dp.memo.split(/\s*(?:→|->)\s*/).filter(Boolean).flatMap((pt,k,arr)=>[h('span',{class:'badge'+((ds && pt===ds.label) || (de && pt===de.label) ? ' done' : '')}, pt), k < arr.length-1 ? h('span',{class:'muted'},'→') : null]).filter(Boolean))
+              : h('div',{class:'small', style:{marginBottom:'6px'}}, `📝 ${dp.memo}`)) : null,
             dp.startTime ? h('div',{class:'small muted', style:{marginBottom:'6px'}}, `この日の活動開始 ${dp.startTime}`) : null,
             it && it.travel ? h('div',{class:'small', style:{marginBottom:'6px'}}, it.travel.flight ? `✈️ 移動 ${it.travel.from} → ${it.travel.to}(飛行機などの移動。所要時間は計算していません)` : `🚗 移動 ${it.travel.from} → ${it.travel.to} ・ ${UI.fmtMin(it.travel.min)}${it.travel.km ? ` (${it.travel.km.toFixed(1)}km)` : ''}${it.estimated ? '(推定)' : ''}`) : null,
-            dp.travelOnly && !(ds && de && !samePt(ds, de)) ? h('div',{class:'small text-warn', style:{marginBottom:'6px'}}, '移動日です。「帰着」で次の宿を設定すると移動の行程が出ます(未設定なら出発地と同じ場所に留まる扱い)') : null,
+            dp.travelOnly && !dp.memo && !(ds && de && !samePt(ds, de)) ? h('div',{class:'small text-warn', style:{marginBottom:'6px'}}, '移動日です。「出発」「帰着」で空港や次の宿を設定すると移動の行程が出ます') : null,
             day.stops.length ? list : h('div',{class:'small muted'}, dp.travelOnly ? '移動日(訪問なし)' : 'この日は訪問なし'),
             h('div',{class:'row mt'},
-              h('button',{class:'btn sm', onClick: async()=>{ if (!ds){ toast('その日の出発地が決まりません', {error:true}); return; } try { const r = await Geo.optimize(ds, day.stops, { roundTrip: !!de && samePt(de, ds), end: de && !samePt(de, ds) ? de : null }); day.stops = r.stops; await recompute(day); toast('並べ直しました'); } catch(e){ toast(e.message,{error:true}); } }}, '✨ この日を最適化'),
+              !day.stops.length ? null : h('button',{class:'btn sm', onClick: async()=>{ if (!ds){ toast('その日の出発地が決まりません', {error:true}); return; } try { const r = await Geo.optimize(ds, day.stops, { roundTrip: !!de && samePt(de, ds), end: de && !samePt(de, ds) ? de : null }); day.stops = r.stops; await recompute(day); toast('並べ直しました'); } catch(e){ toast(e.message,{error:true}); } }}, '✨ この日を最適化'),
               ...navButtons(day),
-              h('a',{class:'btn sm', href:`#/route?date=${day.date}`}, '🚗 ルート画面(反映後)'))
+              day.stops.length ? h('a',{class:'btn sm', href:`#/route?date=${day.date}`}, '🚗 ルート画面(反映後)') : null)
           ));
         });
         /* 全日程を1枚の地図に(日ごとに色分け) */
@@ -780,7 +784,7 @@
           const di = p.days.indexOf(day); const ds = resolveStart(pdates0, di), de = resolveEnd(pdates0, di);
           if (!day.stops.length){
             const dpm = (state.dayPlaces[day.date] || {}).memo || '';
-            if (it && it.travel){ const ws0 = toMin((state.dayPlaces[day.date]||{}).startTime) ?? toMin(state.workStart) ?? 540; const fl = it.travel.flight; Store.save('events', { date: day.date, start: fl ? '' : fmtT(ws0).slice(0,5), end: fl ? '' : fmtT(Math.min(ws0 + it.travel.min, 1439)).slice(0,5), title: `移動 ${it.travel.from} → ${it.travel.to}`, type:'move', customerId:'', address: de ? (de.address||de.label||'') : '', lat: de ? de.lat : null, lng: de ? de.lng : null, memo: [dpm, fl ? '営業計画の移動日(飛行機などの移動)' : `営業計画の移動日(${UI.fmtMin(it.travel.min)}${it.travel.km ? ` / ${it.travel.km.toFixed(1)}km` : ''})`].filter(Boolean).join('\n'), status:'planned', attachmentIds:[], planId }); ev++; }
+            if (it && it.travel){ const ws0 = toMin((state.dayPlaces[day.date]||{}).startTime) ?? toMin(state.workStart) ?? 540; const fl = it.travel.flight; Store.save('events', { date: day.date, start: fl ? '' : fmtT(ws0).slice(0,5), end: fl ? '' : fmtT(Math.min(ws0 + it.travel.min, 1439)).slice(0,5), title: /→|->/.test(dpm) ? `移動 ${dpm.replace(/\s*->\s*/g,'→').slice(0,60)}` : `移動 ${it.travel.from} → ${it.travel.to}`, type:'move', customerId:'', address: de ? (de.address||de.label||'') : '', lat: de ? de.lat : null, lng: de ? de.lng : null, memo: [dpm, fl ? '営業計画の移動日(飛行機などの移動)' : `営業計画の移動日(${UI.fmtMin(it.travel.min)}${it.travel.km ? ` / ${it.travel.km.toFixed(1)}km` : ''})`].filter(Boolean).join('\n'), status:'planned', attachmentIds:[], planId }); ev++; }
             else if (dpm){ Store.save('events', { date: day.date, start:'', end:'', title: `移動日: ${dpm.slice(0,40)}`, type:'move', customerId:'', address:'', lat:null, lng:null, memo: dpm, status:'planned', attachmentIds:[], planId }); ev++; }
             continue;
           }

@@ -142,8 +142,47 @@ async function cards(buffer, mime, fileName){
 
 const ASSIST_SCHEMA = { type:'OBJECT', properties:{
   updates:{ type:'ARRAY', items:{ type:'OBJECT', properties:{ key:{type:'STRING'}, date:{type:'STRING'}, timeFrom:{type:'STRING'}, timeTo:{type:'STRING'}, checked:{type:'BOOLEAN'}, stayMin:{type:'INTEGER'}, reason:{type:'STRING'} }, required:['key'] } },
-  dayPlans:{ type:'ARRAY', items:{ type:'OBJECT', properties:{ date:{type:'STRING'}, travelOnly:{type:'BOOLEAN'}, startPlace:{type:'STRING'}, endPlace:{type:'STRING'}, startTime:{type:'STRING'}, memo:{type:'STRING'} }, required:['date'] } },
+  dayPlans:{ type:'ARRAY', items:{ type:'OBJECT', properties:{ date:{type:'STRING'}, travelOnly:{type:'BOOLEAN'}, startPlace:{type:'STRING'}, startQuery:{type:'STRING'}, endPlace:{type:'STRING'}, endQuery:{type:'STRING'}, startTime:{type:'STRING'}, memo:{type:'STRING'} }, required:['date'] } },
   days:{type:'INTEGER'}, startDate:{type:'STRING'}, maxPerDay:{type:'INTEGER'}, message:{type:'STRING'} }, required:['updates','dayPlans','message'] };
+
+/* 注文文の「11/8は山水荘→羽田→仁川空港→청주역」のような矢印の経路を、AIに頼らず確実に読み取る。
+   渡航日: 現地の最後の空港 → 終点 を現地での移動、帰国日: 出発 → 現地の最初の空港 を現地での移動とする */
+const AIRPORT = /空港|공항|airport|羽田|成田|関空|仁川|金浦/i;
+const JP_AIRPORT = /羽田|成田|関空|関西|中部|伊丹|福岡|新千歳|那覇|福島|仙台|東京/;
+const LOCAL_QUERY = [[/仁川/, '인천국제공항'], [/金浦/, '김포국제공항'], [/清州空港|清州国際空港/, '청주국제공항'], [/釜山|金海/, '김해국제공항']];
+function parseRoutes(text, startDate, homeNames){
+  const y0 = /^\d{4}-\d{2}/.test(startDate) ? Number(startDate.slice(0,4)) : new Date().getFullYear();
+  const m0 = /^\d{4}-\d{2}/.test(startDate) ? Number(startDate.slice(5,7)) : 1;
+  const iso = (m, d) => { let y = y0; if (m < m0 - 6) y++; return `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`; };
+  const isHome = p => (homeNames||[]).some(h => h && h.length >= 2 && (p.includes(h) || h.includes(p)));
+  const DATE = /(\d{1,2})\s*[\/月]\s*(\d{1,2})\s*日?/g;
+  const out = [];
+  for (const piece0 of String(text||'').split(/[\n。]/)){
+    const piece = piece0.replace(/\s*(?:->|⇒|=>|〜>)\s*/g, '→');
+    const chainRe = /[^\s、,，→]+(?:\s*→\s*[^\s、,，→]+)+/g; let cm;
+    while ((cm = chainRe.exec(piece))){
+      const parts = cm[0].split(/\s*→\s*/);
+      // 先頭の要素に付いた日付と助詞(「11/14に仁川空港」→「仁川空港」)を外す
+      let date = null; const head = parts[0]; let dm, last = null; DATE.lastIndex = 0;
+      while ((dm = DATE.exec(head))) last = dm;
+      if (last){ date = iso(Number(last[1]), Number(last[2])); parts[0] = head.slice(last.index + last[0].length).replace(/^\s*(?:は|に|の|、|:|：)\s*/, ''); }
+      else { const before = piece.slice(0, cm.index); let bm; DATE.lastIndex = 0; while ((dm = DATE.exec(before))) bm = dm; if (bm) date = iso(Number(bm[1]), Number(bm[2])); }
+      if (!date) continue;
+      parts[parts.length-1] = parts[parts.length-1].replace(/(?:まで|へ|に|で|です)+$/, '');
+      const pts = parts.map(x=>x.trim()).filter(Boolean); if (pts.length < 2) continue;
+      const ap = pts.map((x,i)=>AIRPORT.test(x) ? i : -1).filter(i=>i >= 0);
+      let startPlace = pts[0], endPlace = pts[pts.length-1];
+      if (ap.length){
+        const a0 = ap[0], a1 = ap[ap.length-1], n = pts.length;
+        if (isHome(pts[0]) || (!isHome(pts[n-1]) && !JP_AIRPORT.test(pts[a1]))){ startPlace = pts[a1]; endPlace = pts[n-1]; }          // 渡航日: 現地の空港から
+        else if (isHome(pts[n-1]) || !JP_AIRPORT.test(pts[a0])){ startPlace = a0 > 0 ? pts[0] : ''; endPlace = pts[a0]; }           // 帰国日: 現地の空港まで
+      }
+      const q = name => { for (const [re, v] of LOCAL_QUERY) if (re.test(name||'')) return v; return ''; };
+      out.push({ date, travelOnly: true, startPlace: startPlace === endPlace ? '' : startPlace, endPlace, startQuery: q(startPlace), endQuery: q(endPlace), memo: pts.join('→') });
+    }
+  }
+  return out;
+}
 
 async function assist(input){
   const rows = Array.isArray(input.rows) ? input.rows.slice(0,300) : [];
@@ -159,9 +198,11 @@ async function assist(input){
 - 期間の変更指示(「4日間にして」「10/20から」)があれば days / startDate を返す。「1日3件まで」のような1日の訪問数の上限は maxPerDay。
 - 移動の日程(飛行機・電車・宿泊ホテル・出発地)の指示は dayPlans に、該当する日付ごとに1要素で返す:
   - travelOnly: その日が移動だけで訪問しない日(渡航日・帰国日・都市間の移動日)なら true。
-  - startPlace: その日の車での出発地(ホテル名・駅名・空港名など、原文の表記のまま)。endPlace: その日の帰着地・宿泊先。指示にある名前だけを書き、推測で埋めない。
+  - startPlace: その日の現地での出発地(ホテル名・駅名・空港名など、原文の表記のまま)。endPlace: その日の帰着地・宿泊先。指示にある名前だけを書き、推測で埋めない。
+  - startQuery / endQuery: startPlace / endPlace を地図で検索するための現地表記(韓国なら韓国語の正式名。例: 仁川空港 → 인천국제공항、イビスアンバサダーホテル明洞 → 이비스 앰배서더 서울 명동)。日本の場所は日本語のまま。
   - 「○○に泊まる」「ホテルはそこ」のように、ある日から同じ宿に連泊する指示は、その宿に泊まる各日の endPlace に同じ名前を入れる(翌日の出発地は自動で前日の宿になるので startPlace は不要)。
-  - 渡航日(例: 山水荘→羽田→仁川空港→청주역)は travelOnly=true、endPlace=到着後に向かう場所や宿(例: 청주역)、memo に経路全体を書く。帰国日(例: 仁川空港→羽田→山水荘)は travelOnly=true、memo に経路、endPlace は空でよい。
+  - 渡航日(例: 山水荘→羽田→仁川空港→청주역)は travelOnly=true、startPlace=現地に着く空港(例: 仁川空港)、endPlace=到着後に向かう場所や宿(例: 청주역)、memo に経路全体を「→」区切りで書く(例: 山水荘→羽田→仁川空港→청주역)。
+  - 帰国日(例: 仁川空港→羽田→山水荘)は travelOnly=true、startPlace は空(前日の宿から出る)、endPlace=現地で出国する空港(例: 仁川空港)、memo に経路全体を「→」区切りで。
   - 到着日の午後から訪問する場合など、その日の活動開始時刻が分かれば startTime(HH:MM)。
   - memo: その日の補足(便名・経路・注意)を短く。
 - message: 何をどう反映したかを日本語で1〜2文。対応づけできなかった名前があればここに書く。`;
@@ -185,9 +226,19 @@ async function assist(input){
   if (Math.floor(Number(out.days)) > 0) res.days = Math.min(60, Math.floor(Number(out.days)));
   if (/^\d{4}-\d{2}-\d{2}$/.test(str(out.startDate))) res.startDate = out.startDate;
   if (Math.floor(Number(out.maxPerDay)) > 0) res.maxPerDay = Math.min(30, Math.floor(Number(out.maxPerDay)));
+  const routes = parseRoutes(instruction, startDate, Array.isArray(input.homeNames) ? input.homeNames.map(str).slice(0,5) : []);
   res.dayPlans = (Array.isArray(out.dayPlans) ? out.dayPlans : []).filter(d=>d && /^\d{4}-\d{2}-\d{2}$/.test(str(d.date))).map(d=>({
     date: str(d.date), travelOnly: typeof d.travelOnly === 'boolean' ? d.travelOnly : undefined,
-    startPlace: str(d.startPlace).slice(0,120), endPlace: str(d.endPlace).slice(0,120), startTime: hhmm(d.startTime), memo: str(d.memo).slice(0,300) }));
+    startPlace: str(d.startPlace).slice(0,120), startQuery: str(d.startQuery).slice(0,120), endPlace: str(d.endPlace).slice(0,120), endQuery: str(d.endQuery).slice(0,120), startTime: hhmm(d.startTime), memo: str(d.memo).slice(0,300) }));
+  // 矢印の経路は読み取り結果を優先して補う(AIが空で返したり、出発地・空港を入れ忘れたりするため)
+  for (const r of routes){
+    let d = res.dayPlans.find(x=>x.date === r.date);
+    if (!d){ d = { date: r.date, startPlace:'', startQuery:'', endPlace:'', endQuery:'', startTime:'', memo:'' }; res.dayPlans.push(d); }
+    d.travelOnly = true; d.memo = r.memo;
+    if (r.startPlace){ d.startPlace = r.startPlace; d.startQuery = r.startQuery || (d.startPlace === r.startPlace ? d.startQuery : ''); }
+    if (r.endPlace){ d.endPlace = r.endPlace; d.endQuery = r.endQuery || (d.endPlace === r.endPlace ? d.endQuery : ''); }
+  }
+  res.dayPlans.sort((a,b)=>a.date.localeCompare(b.date));
   return res;
 }
 
@@ -249,4 +300,4 @@ async function handle(req, res, url, { readBody, send }){
   } catch(e){ console.error('[ai]', e.message); send(res, e.status || 500, { error: e.message || 'AI処理に失敗しました' }); }
   return true;
 }
-module.exports = { handle, extract, assist, lookup, cards, hotels };
+module.exports = { handle, extract, assist, lookup, cards, hotels, parseRoutes };
