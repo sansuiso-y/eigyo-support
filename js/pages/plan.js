@@ -383,7 +383,7 @@
           if (cust && !r.customerId){ linkFromCard(r, cust); saveDraft(); }
           const catSel = h('select',{style:{minWidth:'130px', width:'130px'}, title:'区分', onChange:(e)=>{ r.category=e.target.value; saveDraft(); renderList(); }}, [['','(なし)'], ...CATS.map(c=>[c,c]), ...(r.category && !CATS.includes(r.category) ? [[r.category, r.category]] : [])].map(([v,l])=>h('option',{value:v, selected:v===r.category}, l)));
           const tr = h('tr',{class: r.checked?'':'muted'},
-            h('td',null, h('input',{type:'checkbox', checked:r.checked, onChange:(e)=>{ r.checked=e.target.checked; tr.className = r.checked ? '' : 'muted'; saveDraft(); refreshSel(); }})),
+            h('td',null, h('input',{type:'checkbox', checked:r.checked, onChange:(e)=>{ r.checked=e.target.checked; tr.className = r.checked ? '' : 'muted'; saveDraft(); refreshSel(); markDirty(); }})),
             h('td',{class:'nowrap'}, cust
               ? h('div',{class:'row', style:{gap:'4px', flexWrap:'nowrap'}}, h('a',{class:'badge done', href:`#/customers?id=${cust.id}`, title:`名刺を開く: ${S.customerLabel(cust)}`}, '登録済'), h('button',{class:'btn sm', title:'別の名刺に紐付け直す', style:{padding:'2px 6px'}, onClick:()=>pickCustomer(r, ()=>{ saveDraft(); renderList(); toast('紐付けを変更しました'); })}, '✎'))
               : h('div',{class:'row', style:{gap:'4px', flexWrap:'nowrap'}}, h('span',{class:'badge planned', title:'名刺に未登録'}, '未登録'), h('button',{class:'btn sm', style:{padding:'2px 6px'}, title:'登録済みの名刺から選んで紐付ける', onClick:()=>pickCustomer(r, (c)=>{ saveDraft(); renderList(); toast(`「${S.customerLabel(c)}」と紐付けました`); })}, '名刺を選ぶ'))),
@@ -392,9 +392,12 @@
             cell(r,'phone',{style:{minWidth:'110px'}}),
             h('td',null, h('div',{class:'row', style:{flexWrap:'nowrap'}}, h('input',{type:'text', value:r.address||'', placeholder:'住所(ルート作成に必要)', style:{minWidth:'200px'}, onChange:(e)=>{ r.address=e.target.value; r.lat=null; r.lng=null; r.geoNote=''; saveDraft(); renderList(); }}),
               h('a',{class:'btn sm', href:`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent((r.company||'')+' '+(r.address||''))}`, target:'_blank', rel:'noopener', title:'地図で住所を調べる'}, '🔍'))),
-            h('td',null, h('input',{type:'date', value:r.date||'', style:{width:'150px'}, onChange:(e)=>{ r.date=e.target.value; saveDraft(); }})),
-            h('td',null, h('div',{class:'row', style:{flexWrap:'nowrap', gap:'2px'}}, h('input',{type:'time', value:r.timeFrom||'', style:{width:'105px'}, title:'この時刻以降', onChange:(e)=>{ r.timeFrom=e.target.value; saveDraft(); }}), '〜', h('input',{type:'time', value:r.timeTo||'', style:{width:'105px'}, title:'この時刻まで', onChange:(e)=>{ r.timeTo=e.target.value; saveDraft(); }}))),
-            h('td',null, h('input',{type:'number', value:r.stayMin||'', placeholder:String(settings.defaultStayMin||45), min:5, step:5, style:{width:'70px'}, onChange:(e)=>{ r.stayMin = Number(e.target.value)||null; saveDraft(); }})),
+            h('td',null, (()=>{ const ds = /^\d{4}-\d{2}-\d{2}$/.test(state.startDate||'') ? condDates() : [];
+              const opts = [['', '指定なし'], ...ds.map((d,i)=>[d, `${i+1}日目 ${UI.fmtDate(d)}${isTravelOnly(d) ? '(移動日)' : ''}`])];
+              if (r.date && !ds.includes(r.date)) opts.push([r.date, `${UI.fmtDate(r.date)}(期間外)`]);
+              return h('select',{style:{width:'150px'}, class: r.date && !ds.includes(r.date) ? 'text-danger' : '', title: r.date && !ds.includes(r.date) ? '計画の期間外の日付です。期間内の日を選び直してください' : '希望日(計画の日から選ぶ)', onChange:(e)=>{ r.date = e.target.value; saveDraft(); markDirty(); renderList(); }}, opts.map(([v,l])=>h('option',{value:v, selected:(r.date||'')===v}, l))); })()),
+            h('td',null, h('div',{class:'row', style:{flexWrap:'nowrap', gap:'2px'}}, h('input',{type:'time', value:r.timeFrom||'', style:{width:'105px'}, title:'この時刻以降', onChange:(e)=>{ r.timeFrom=e.target.value; saveDraft(); markDirty(); }}), '〜', h('input',{type:'time', value:r.timeTo||'', style:{width:'105px'}, title:'この時刻まで', onChange:(e)=>{ r.timeTo=e.target.value; saveDraft(); markDirty(); }}))),
+            h('td',null, h('input',{type:'number', value:r.stayMin||'', placeholder:String(settings.defaultStayMin||45), min:5, step:5, style:{width:'70px'}, onChange:(e)=>{ r.stayMin = Number(e.target.value)||null; saveDraft(); markDirty(); }})),
             h('td',{class:'nowrap small'}, hasCoord(r) ? h('a',{href:'#', class:'badge '+(r.geoNote?'draft':'done'), title:(r.geoNote ? r.geoNote+' / ' : '')+'クリックで地図に表示', style:{textDecoration:'none', cursor:'pointer'}, onClick:(e)=>{ e.preventDefault(); showMap(r); }}, r.geoNote ? '要確認 🗺' : 'OK 🗺') : h('span',{class:'badge draft'}, r.address ? '未取得' : '住所なし')),
             h('td',null, h('button',{class:'btn sm', onClick:()=>{ state.rows = state.rows.filter(x=>x!==r); saveDraft(); renderList(); }}, '✕'))
           );
@@ -460,12 +463,12 @@
       }
 
       /* ===== 2. 計画条件 ===== */
-      const startDateInp = input({type:'date', value:state.startDate, onChange:(e)=>{ state.startDate=e.target.value; saveDraft(); }});
-      const daysInp = input({type:'number', value:state.days, min:1, max:30, onChange:(e)=>{ state.days=Math.max(1,Number(e.target.value)||1); saveDraft(); }});
-      const wsInp = input({type:'time', value:state.workStart, onChange:(e)=>{ state.workStart=e.target.value; saveDraft(); }});
-      const weInp = input({type:'time', value:state.workEnd, onChange:(e)=>{ state.workEnd=e.target.value; saveDraft(); }});
+      const startDateInp = input({type:'date', value:state.startDate, onChange:(e)=>{ state.startDate=e.target.value; saveDraft(); markDirty(); renderList(); }});
+      const daysInp = input({type:'number', value:state.days, min:1, max:30, onChange:(e)=>{ state.days=Math.max(1,Number(e.target.value)||1); saveDraft(); markDirty(); renderList(); }});
+      const wsInp = input({type:'time', value:state.workStart, onChange:(e)=>{ state.workStart=e.target.value; saveDraft(); markDirty(); }});
+      const weInp = input({type:'time', value:state.workEnd, onChange:(e)=>{ state.workEnd=e.target.value; saveDraft(); markDirty(); }});
       const roundChk = h('input',{type:'checkbox', checked:state.roundTrip, onChange:(e)=>{ state.roundTrip=e.target.checked; saveDraft(); }});
-      const maxInp = input({type:'number', value:state.maxPerDay, min:1, max:30, onChange:(e)=>{ state.maxPerDay=Math.min(30, Math.max(1, Number(e.target.value)||5)); saveDraft(); }});
+      const maxInp = input({type:'number', value:state.maxPerDay, min:1, max:30, onChange:(e)=>{ state.maxPerDay=Math.min(30, Math.max(1, Number(e.target.value)||5)); saveDraft(); markDirty(); }});
       const startAddrInp = input({type:'text', value:state.startAddress, placeholder:'例: 宿泊ホテルの住所、駅名(未入力なら設定の拠点)'});
       const startInfo = h('div',{class:'small muted'}, hasCoord({lat:state.startLat,lng:state.startLng}) ? `出発地: ${state.startLabel||state.startAddress||'設定の拠点'} (座標OK)` : '出発地の座標が未設定です。上の欄に住所を入れて「設定」を押してください');
       async function setStart(){
@@ -567,6 +570,7 @@
           const stops = ready.map(r=>({ key:r.key, label: rowLabel(r), name:r.name, company:r.company, address:r.address, lat:Number(r.lat), lng:Number(r.lng), stayMin: r.stayMin || settings.defaultStayMin || 45, customerId:r.customerId, memo:r.memo, date:r.date||'', timeFrom:r.timeFrom||'', timeTo:r.timeTo||'', ...(r.legMode ? { legMode:r.legMode } : {}) }));
           const res = await buildPlan(start, stops, state, placesFor(Array.from({length: state.days}, (_,d)=>UI.addDays(state.startDate, d))));
           state.plan = { days: res.days, unassigned: res.unassigned, itins:{} };
+          state.planDirty = false; showDirty();
           for (const d of state.plan.days){ const ex = (state.dayPlaces[d.date] || {}).extras || []; for (const x of ex) if (!d.stops.some(y=>y.key===x.key)) d.stops.push(JSON.parse(JSON.stringify(x))); }   // 手で追加した予定(リスト外)を戻す
           saveDraft(); await computeAll(); renderPlan();
           toast(`${res.days.length}日分の計画を作成しました${res.unassigned.length?`(${res.unassigned.length}件は日数内に入りませんでした)`:''}${skipped?`(座標なし ${skipped}件は除外)`:''}`, {ms:5000});
@@ -577,6 +581,16 @@
 
       /* ===== 3. 日ごとの計画 ===== */
       const planEl = h('div');
+      /* 計画を作った後にリストや条件を変えたら、作り直しを促す */
+      const dirtyEl = h('div');
+      function showDirty(){
+        UI.clear(dirtyEl);
+        if (state.plan && state.planDirty) dirtyEl.appendChild(h('div',{class:'notice', style:{display:'flex', gap:'10px', alignItems:'center', flexWrap:'wrap', marginBottom:'10px', borderColor:'var(--warn, #d97706)'}},
+          h('span',null, '⚠ 訪問先リストか条件が変わりました。下の計画はまだ古いままです。'),
+          h('button',{class:'btn sm primary', onClick:()=>{ buildBtn.click(); }}, '✨ 計画を作り直す')));
+      }
+      function markDirty(){ if (state.plan){ state.planDirty = true; saveDraft(); showDirty(); } }
+      const condDates = () => Array.from({length: Math.min(30, Math.max(1, Math.floor(Number(state.days))||1))}, (_,d)=>UI.addDays(state.startDate, d));
       async function computeAll(){
         const dates = state.plan.days.map(d=>d.date);
         for (let i = 0; i < state.plan.days.length; i++){
@@ -1075,7 +1089,7 @@
       }
 
       /* ===== 保存した計画(全員で共有。端末内の下書きとは別) ===== */
-      const SAVE_KEYS = ['rows','filter','onlyNew','startDate','days','workStart','workEnd','roundTrip','startAddress','startLat','startLng','startLabel','dayPlaces','maxPerDay','aiText','aiApplied'];
+      const SAVE_KEYS = ['rows','filter','onlyNew','startDate','days','workStart','workEnd','roundTrip','startAddress','startLat','startLng','startLabel','dayPlaces','maxPerDay','aiText','aiApplied','planDirty'];
       function snapshot(name){
         const o = { name };
         SAVE_KEYS.forEach(k=>{ o[k] = JSON.parse(JSON.stringify(state[k] === undefined ? null : state[k])); });
@@ -1146,10 +1160,10 @@
             h('p',{class:'small muted'}, '「計画を自動作成」を押すと、ここに書いた注文を先に反映してから作成します。例:「제이여행사は2日目の午前、범한항공は最終日の15時以降」「청주市内は1日目にまとめて」「メディアは回らない」。表の希望日・時間帯・選択に反映されます(クラウド版のみ)。'),
             aiBox, h('div',{class:'row mt'}, aiMsg)),
           h('div',{class:'row mt'}, buildBtn, h('span',{class:'small muted'}, '選択した訪問先を、希望日・時間帯を守りつつ近い順に日ごとへ振り分け、各日の順番を最適化します。'))),
-        h('h2',{class:'mt'}, '3. 日ごとの計画'), planEl
+        h('h2',{class:'mt'}, '3. 日ごとの計画'), dirtyEl, planEl
       );
       if (state.aiApplied && state.aiText && state.aiText.trim() === state.aiApplied) aiMsg.textContent = '注文は反映済みです(書き換えると次の「計画を自動作成」で反映します)';
-      renderList(); renderPlan();
+      renderList(); renderPlan(); showDirty();
       if (state.plan && state.plan.days && (!state.plan.itins || !Object.keys(state.plan.itins).length) && startPt()){ computeAll().then(renderPlan).catch(e=>console.warn('recompute failed', e)); } // 保存した計画を開いた直後(行程は保存せず計算し直す)
       if (params.customer){ const c = Store.get('customers', params.customer); if (c && !state.rows.some(r=>r.customerId===c.id)){ state.rows.push(Object.assign(emptyRow(), {company:c.company||'', name:c.name||'', title:c.title||'', phone:c.phone||'', address:c.address||'', lat:c.lat, lng:c.lng, customerId:c.id})); saveDraft(); renderList(); } }
       return { destroy: ()=>offSaved() }; // 画面を離れたら購読を外す
