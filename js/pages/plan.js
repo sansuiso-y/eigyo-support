@@ -268,19 +268,23 @@
           h('span',{class:'small muted', style:{alignSelf:'center'}}, `名刺: 登録済 ${regCount} / 未登録 ${state.rows.length-regCount}`));
         const visible = state.rows.filter(r=>(!state.filter || r.category===state.filter) && (!state.onlyNew || !((r.customerId && Store.get('customers', r.customerId)) || findCustomer(r))));
         const checkedCount = state.rows.filter(r=>r.checked).length;
+        // 行のチェックを変えたら、表全体を描き直さずに「選択 N 件」と削除ボタンだけ更新する
+        const countEl = h('span',{class:'small muted'}, `選択 ${checkedCount} 件`);
+        let delBtn = null;
+        const refreshSel = ()=>{ const n = state.rows.filter(r=>r.checked).length; countEl.textContent = `選択 ${n} 件`; if (delBtn) delBtn.disabled = !n; };
         const tools = h('div',{class:'row mt'},
           h('button',{class:'btn sm', onClick:()=>{ visible.forEach(r=>r.checked=true); saveDraft(); renderList(); }}, '表示中を選択'),
           h('button',{class:'btn sm', onClick:()=>{ visible.forEach(r=>r.checked=false); saveDraft(); renderList(); }}, '表示中を解除'),
           state.filter ? h('button',{class:'btn sm primary', onClick:()=>{ state.rows.forEach(r=>r.checked = r.category===state.filter); saveDraft(); renderList(); toast(`「${state.filter}」だけを選択しました`); }}, `「${state.filter}」だけ回る`) : null,
-          h('span',{class:'small muted'}, `選択 ${checkedCount} 件`),
+          countEl,
           h('label',{class:'row small', style:{gap:'4px'}}, h('input',{type:'checkbox', checked:!!state.onlyNew, onChange:(e)=>{ state.onlyNew=e.target.checked; saveDraft(); renderList(); }}), '名刺に未登録の行だけ表示'),
           h('span',{style:{flex:1}}),
           h('button',{class:'btn sm', title:'登録済みの名刺と自動で照合し直します(名刺を取り込んだ後に)', onClick:()=>{ let n=0; state.rows.forEach(r=>{ if (!(r.customerId && Store.get('customers', r.customerId))){ r.customerId=null; const c=findCustomer(r); if (c){ linkFromCard(r,c); n++; } } }); saveDraft(); renderList(); toast(n ? `${n}件を名刺と紐付けました` : '新たに一致する名刺はありませんでした'); }}, '🔗 名刺と照合'),
           h('button',{class:'btn sm', onClick:lookupAddresses, title:'住所が空の行について、会社名からAIがWeb検索で所在地を調べます(要確認)'}, '🌐 AIで住所を調べる'),
           h('button',{class:'btn sm', onClick:geocodeAll}, '📍 選択行の座標を取得'),
           h('button',{class:'btn sm', onClick:registerCustomers}, '👤 選択行を名刺に登録'),
-          h('button',{class:'btn sm danger', disabled: !checkedCount, onClick: async()=>{ const n = state.rows.filter(r=>r.checked).length; if (!n) return; if (await UI.confirm(`チェックした ${n} 件をリストから削除しますか?(名刺の登録は消えません)`)){ state.rows = state.rows.filter(r=>!r.checked); saveDraft(); renderList(); toast(`${n}件を削除しました`); } }}, '🗑 選択行を削除'),
-          h('button',{class:'btn sm danger', onClick: async()=>{ if (await UI.confirm('リストをすべて消しますか?')){ state.rows=[]; state.plan=null; saveDraft(); renderList(); renderPlan(); } }}, 'リストを消す')
+          (delBtn = h('button',{class:'btn sm danger', disabled: !checkedCount, onClick: async()=>{ const n = state.rows.filter(r=>r.checked).length; if (!n) return; if (await UI.confirm(`チェックした ${n} 件をリストから削除しますか?(名刺の登録は消えません)`)){ state.rows = state.rows.filter(r=>!r.checked); saveDraft(); renderList(); toast(`${n}件を削除しました`); } }}, '🗑 選択行を削除')),
+          h('button',{class:'btn sm danger', title:'リストの全行と作成済みの計画を消します', onClick: async()=>{ const n = state.rows.length; if (await UI.confirm(`リストの ${n} 件をすべて削除しますか?(名刺の登録は消えません)`)){ state.rows=[]; state.plan=null; saveDraft(); renderList(); renderPlan(); toast('リストをすべて削除しました'); } }}, '🗑 すべて削除')
         );
         if (!state.rows.length){ listEl.append(UI.empty('まだ訪問先がありません。上のボタンから写真・PDF・Excel・名刺を取り込むか、手入力で追加してください。')); return; }
         const tbl = h('table',{class:'tbl plan-tbl'}, h('thead',null, h('tr',null, ['','名刺','会社名','氏名','役職','区分','電話','住所','希望日','時間帯','滞在','座標',''].map(t=>h('th',null,t)))));
@@ -290,8 +294,8 @@
           const cust = (r.customerId && Store.get('customers', r.customerId)) || findCustomer(r) || null;
           if (cust && !r.customerId){ linkFromCard(r, cust); saveDraft(); }
           const catSel = h('select',{style:{minWidth:'130px', width:'130px'}, title:'区分', onChange:(e)=>{ r.category=e.target.value; saveDraft(); renderList(); }}, [['','(なし)'], ...CATS.map(c=>[c,c]), ...(r.category && !CATS.includes(r.category) ? [[r.category, r.category]] : [])].map(([v,l])=>h('option',{value:v, selected:v===r.category}, l)));
-          tb.appendChild(h('tr',{class: r.checked?'':'muted'},
-            h('td',null, h('input',{type:'checkbox', checked:r.checked, onChange:(e)=>{ r.checked=e.target.checked; saveDraft(); }})),
+          const tr = h('tr',{class: r.checked?'':'muted'},
+            h('td',null, h('input',{type:'checkbox', checked:r.checked, onChange:(e)=>{ r.checked=e.target.checked; tr.className = r.checked ? '' : 'muted'; saveDraft(); refreshSel(); }})),
             h('td',{class:'nowrap'}, cust
               ? h('div',{class:'row', style:{gap:'4px', flexWrap:'nowrap'}}, h('a',{class:'badge done', href:`#/customers?id=${cust.id}`, title:`名刺を開く: ${S.customerLabel(cust)}`}, '登録済'), h('button',{class:'btn sm', title:'別の名刺に紐付け直す', style:{padding:'2px 6px'}, onClick:()=>pickCustomer(r, ()=>{ saveDraft(); renderList(); toast('紐付けを変更しました'); })}, '✎'))
               : h('div',{class:'row', style:{gap:'4px', flexWrap:'nowrap'}}, h('span',{class:'badge planned', title:'名刺に未登録'}, '未登録'), h('button',{class:'btn sm', style:{padding:'2px 6px'}, title:'登録済みの名刺から選んで紐付ける', onClick:()=>pickCustomer(r, (c)=>{ saveDraft(); renderList(); toast(`「${S.customerLabel(c)}」と紐付けました`); })}, '名刺を選ぶ'))),
@@ -305,7 +309,8 @@
             h('td',null, h('input',{type:'number', value:r.stayMin||'', placeholder:String(settings.defaultStayMin||45), min:5, step:5, style:{width:'70px'}, onChange:(e)=>{ r.stayMin = Number(e.target.value)||null; saveDraft(); }})),
             h('td',{class:'nowrap small'}, hasCoord(r) ? (r.geoNote ? h('span',{class:'badge draft', title:r.geoNote}, '要確認') : h('span',{class:'badge done'},'OK')) : h('span',{class:'badge draft'}, r.address ? '未取得' : '住所なし')),
             h('td',null, h('button',{class:'btn sm', onClick:()=>{ state.rows = state.rows.filter(x=>x!==r); saveDraft(); renderList(); }}, '✕'))
-          ));
+          );
+          tb.appendChild(tr);
         }
         tbl.appendChild(tb);
         listEl.append(chips, tools, h('div',{class:'tbl-wrap mt'}, tbl),
