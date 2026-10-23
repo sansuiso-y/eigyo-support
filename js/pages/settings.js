@@ -41,7 +41,9 @@ App.register('settings', {
         field('業務終了', input({type:'time', name:'workEnd', value:s.workEnd})),
         field('1訪問の標準滞在(分)', input({type:'number', name:'defaultStayMin', value:s.defaultStayMin, min:5, step:5}))
       ),
-      field('表示テーマ', select([['auto','端末に合わせる'],['light','ライト'],['dark','ダーク']], s.theme, {name:'theme'}))
+      h('div',{class:'f-row'},
+        field('表示テーマ', select([['auto','端末に合わせる'],['light','ライト'],['dark','ダーク']], s.theme, {name:'theme'})),
+        field('地図検索(🔍)で開く地図', select([['auto','自動(韓国語の住所はNAVER、それ以外はGoogle)'],['google','Googleマップ'],['naver','NAVERマップ']], s.mapSearch || 'auto', {name:'mapSearch'}), {hint:'この端末だけの設定です'}))
     );
     const saveBtn = h('button',{class:'btn primary', onClick: async()=>{
       const v = UI.readForm(form);

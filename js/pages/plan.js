@@ -391,7 +391,8 @@
             h('td',{style:{minWidth:'140px'}}, catSel),
             cell(r,'phone',{style:{minWidth:'110px'}}),
             h('td',null, h('div',{class:'row', style:{flexWrap:'nowrap'}}, h('input',{type:'text', value:r.address||'', placeholder:'住所(ルート作成に必要)', style:{minWidth:'200px'}, onChange:(e)=>{ r.address=e.target.value; r.lat=null; r.lng=null; r.geoNote=''; saveDraft(); renderList(); }}),
-              h('a',{class:'btn sm', href:`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent((r.company||'')+' '+(r.address||''))}`, target:'_blank', rel:'noopener', title:'地図で住所を調べる'}, '🔍'))),
+              (()=>{ const q = ((r.company||'')+' '+(r.address||'')).trim(); const pv = S.mapSearchProvider(q);
+                return h('a',{class:'btn sm', href: S.mapSearchUrl(q), target:'_blank', rel:'noopener', title:`${pv === 'naver' ? 'NAVERマップ' : 'Googleマップ'}で住所を調べる(設定で変更できます)`}, pv === 'naver' ? '🔍N' : '🔍'); })())),
             h('td',null, (()=>{ const ds = /^\d{4}-\d{2}-\d{2}$/.test(state.startDate||'') ? condDates() : [];
               const opts = [['', '指定なし'], ...ds.map((d,i)=>[d, `${i+1}日目 ${UI.fmtDate(d)}${isTravelOnly(d) ? '(移動日)' : ''}`])];
               if (r.date && !ds.includes(r.date)) opts.push([r.date, `${UI.fmtDate(r.date)}(期間外)`]);
@@ -406,7 +407,7 @@
         tbl.appendChild(tb);
         listEl.append(chips, tools, h('div',{class:'tbl-wrap mt'}, tbl),
           h('div',{class:'row mt'}, h('button',{class:'btn sm', onClick:()=>{ state.rows.push(emptyRow()); saveDraft(); renderList(); }}, '＋ 行を追加'),
-            h('span',{class:'small muted'}, '住所の欄の 🔍 で地図検索を開き、見つけた住所を貼り付けてください。')));
+            h('span',{class:'small muted'}, '住所の欄の 🔍 で地図検索を開き、見つけた住所を貼り付けてください(🔍N = NAVERマップ。どちらで開くかは「設定」で選べます)。')));
       }
       async function lookupAddresses(){
         const targets = state.rows.filter(r=>r.checked && !r.address && (r.company||r.name)).slice(0,20);

@@ -48,7 +48,7 @@
     settings(){
       try { return Object.assign({
         userName:'', company:'', homeAddress:'', homeLat:null, homeLng:null,
-        workStart:'09:00', workEnd:'18:00', defaultStayMin:45, theme:'auto'
+        workStart:'09:00', workEnd:'18:00', defaultStayMin:45, theme:'auto', mapSearch:'auto'
       }, JSON.parse(localStorage.getItem(PREFIX+'settings')||'{}')); } catch(e){ return {}; }
     },
     saveSettings(obj){
@@ -161,7 +161,7 @@
     const K = { recs: PREFIX+'sync.dirtyRecs', cols: PREFIX+'sync.replaceCols', settings: PREFIX+'sync.dirtySettings',
       fsynced: PREFIX+'sync.filesSynced', fdel: PREFIX+'sync.fileDeletes', last: PREFIX+'sync.lastAt', init: PREFIX+'sync.initDone' };
     const canTry = /^https?:$/.test(location.protocol);
-    const LOCAL_KEYS = ['userName','theme']; // 端末ごとの値(複数人で共有しない)
+    const LOCAL_KEYS = ['userName','theme','mapSearch']; // 端末ごとの値(複数人で共有しない)
     // mode: 'server'(同期サーバーあり/確認中) | 'static'(同期機能のないWebサーバー) | 'none'(file:// で直接開いた)
     const st = { mode: canTry ? 'server' : 'none', online: false, checked: false, syncing: false, auth: false, user: null, needLogin: false,
       lastSyncAt: localStorage.getItem(K.last) || null, lastError: null, serverUrl: location.origin };

@@ -73,6 +73,9 @@
 
   /* shared helpers used by several pages */
   const Shared = {
+    /* 地図検索(🔍)のリンク。設定「地図検索で開く地図」: auto = ハングルを含めば NAVER、それ以外は Google */
+    mapSearchProvider(q){ const m = (Store.settings().mapSearch || 'auto'); return m === 'auto' ? (/[\uac00-\ud7a3]/.test(q||'') ? 'naver' : 'google') : m; },
+    mapSearchUrl(q){ q = String(q||'').trim(); return Shared.mapSearchProvider(q) === 'naver' ? `https://map.naver.com/p/search/${encodeURIComponent(q)}` : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`; },
     customerLabel(c){ if(!c) return ''; return [c.company, c.name].filter(Boolean).join(' / '); },
     customerOptions(includeEmpty=true){
       const cs = Store.list('customers').sort((a,b)=>(a.company||'').localeCompare(b.company||'', 'ja'));
