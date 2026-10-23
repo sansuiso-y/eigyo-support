@@ -76,6 +76,14 @@
     /* 地図検索(🔍)のリンク。設定「地図検索で開く地図」: auto = ハングルを含めば NAVER、それ以外は Google */
     mapSearchProvider(q){ const m = (Store.settings().mapSearch || 'auto'); return m === 'auto' ? (/[\uac00-\ud7a3]/.test(q||'') ? 'naver' : 'google') : m; },
     mapSearchUrl(q){ q = String(q||'').trim(); return Shared.mapSearchProvider(q) === 'naver' ? `https://map.naver.com/p/search/${encodeURIComponent(q)}` : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`; },
+    /* 会社名と住所から地図検索のリンク。NAVER は「会社名+住所」だと見つからないので住所だけ(括弧書き・階・号室を除く)、住所が無ければ会社名だけ */
+    placeSearch(company, address){
+      const co = String(company||'').replace(/㈜|\(주\)|（주）|주식회사|株式会社|㈱/g,'').trim();
+      const ad = String(address||'').replace(/[（(][^)）]*[)）]?/g,' ').replace(/,.*$/,'').replace(/\s+\S*(빌딩|타워|상가동|상가|오피스텔|プラザ|ビル)\S*.*$/,'').replace(/\s+\d+\s*(층|호|階|号室)\s*$/,'').replace(/(로|길)\s+(\d+번(가)?길)/g,'$1$2').replace(/\s+/g,' ').trim();   // 「구룡산로 52번가길」→ 正式表記「구룡산로52번가길」
+      const provider = Shared.mapSearchProvider(ad || co);
+      const q = provider === 'naver' ? (ad || co) : [co, String(address||'').trim()].filter(Boolean).join(' ');
+      return { provider, q, url: provider === 'naver' ? `https://map.naver.com/p/search/${encodeURIComponent(q)}` : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}` };
+    },
     customerLabel(c){ if(!c) return ''; return [c.company, c.name].filter(Boolean).join(' / '); },
     customerOptions(includeEmpty=true){
       const cs = Store.list('customers').sort((a,b)=>(a.company||'').localeCompare(b.company||'', 'ja'));

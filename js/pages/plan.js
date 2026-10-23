@@ -391,8 +391,8 @@
             h('td',{style:{minWidth:'140px'}}, catSel),
             cell(r,'phone',{style:{minWidth:'110px'}}),
             h('td',null, h('div',{class:'row', style:{flexWrap:'nowrap'}}, h('input',{type:'text', value:r.address||'', placeholder:'住所(ルート作成に必要)', style:{minWidth:'200px'}, onChange:(e)=>{ r.address=e.target.value; r.lat=null; r.lng=null; r.geoNote=''; saveDraft(); renderList(); }}),
-              (()=>{ const q = ((r.company||'')+' '+(r.address||'')).trim(); const pv = S.mapSearchProvider(q);
-                return h('a',{class:'btn sm', href: S.mapSearchUrl(q), target:'_blank', rel:'noopener', title:`${pv === 'naver' ? 'NAVERマップ' : 'Googleマップ'}で住所を調べる(設定で変更できます)`}, pv === 'naver' ? '🔍N' : '🔍'); })())),
+              (()=>{ const ps = S.placeSearch(r.company, r.address);
+                return h('a',{class:'btn sm', href: ps.url, target:'_blank', rel:'noopener', title:`${ps.provider === 'naver' ? 'NAVERマップ' : 'Googleマップ'}で「${ps.q}」を検索(設定で変更できます)`}, ps.provider === 'naver' ? '🔍N' : '🔍'); })())),
             h('td',null, (()=>{ const ds = /^\d{4}-\d{2}-\d{2}$/.test(state.startDate||'') ? condDates() : [];
               const opts = [['', '指定なし'], ...ds.map((d,i)=>[d, `${i+1}日目 ${UI.fmtDate(d)}${isTravelOnly(d) ? '(移動日)' : ''}`])];
               if (r.date && !ds.includes(r.date)) opts.push([r.date, `${UI.fmtDate(r.date)}(期間外)`]);
